@@ -7,7 +7,7 @@ irq_pin = Pin(17, Pin.IN, Pin.PULL_UP)
 radio = SI4703(i2c, reset_pin)
 
 radio.power_cristal(True)
-radio.mute(False)
 radio.enable(True)
-
 radio.set_frequency(98.2)  # Set frequency to 98.2 MHz
+radio.set_volume(1)       # Set volume to lowest level
+radio.mute(False)         # Unmute the audio

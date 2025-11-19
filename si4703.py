@@ -1,4 +1,21 @@
+import time
+from machine import Pin
+
 I2C_ADDRESS = 0x10
+
+REG_DEVICE_ID = 0x00
+REG_POWERCFG = 0x02
+REG_CHANNEL = 0x03
+REG_SYSCONFIG1 = 0x04
+REG_SYSCONFIG2 = 0x05
+REG_SYSCONFIG3 = 0x06
+REG_TEST1 = 0x07
+REG_STATUSRSSI = 0x0A
+REG_READCHAN = 0x0B
+REG_RDSA = 0x0C
+REG_RDSB = 0x0D
+REG_RDSC = 0x0E
+REG_RDSD = 0x0F
 
 class SI4703:
     def __init__(self, i2c_bus, reset_pin, interrupt_pin=None):
@@ -10,61 +27,110 @@ class SI4703:
         self.rds_irq = None
         self.tuned_irq = None
 
+        self.seek_in_progress = False
+        self.seek_found_frequency = None
+
         # Reset the chip
         self.reset_pin.value(0)
         time.sleep(0.1)
         self.reset_pin.value(1)
         time.sleep(0.1)
-        self.read_registers()
+        self._read_registers()
 
         # set initial configuration
         if self.interrupt_pin:
             self.interrupt_pin.irq(trigger=Pin.IRQ_FALLING, handler=self._irq_handler)
             self.shadow_register[2] |= 0x0004  # Enable interrupt pin
-            self.write_registers(2)
+            self._write_registers(2)
             self.shadow_register[10] |= 0x0040  # Enable interrupt
-            self.write_registers(10)
+            self._write_registers(10)
 
         # Set europe config as default
         self.shadow_register[2] |= 0x0800  # Set to De-emphasis 50us
         self.shadow_register[5] |= 0x0010  # Set to 87.5MHz, 100kHz spacing
-        self.write_registers(2)
+        self._write_registers(2)
 
     def _irq_handler(self, pin):
-        pass
+        self._read_registers(REG_STATUSRSSI)
+        status = self.shadow_register[REG_STATUSRSSI]
+        if status & 0x0020:  # Seek/Tune complete
+            if self.seek_in_progress:
+                #get the found channel
+                self._read_registers(REG_READCHAN)
+                readchan = self.shadow_register[REG_READCHAN]
+                frequency = 87.5 + (readchan & 0x03FF) / 10.0
+                self.seek_found_frequency.append(frequency)
+                self.seek_all()  # continue seeking
+            else:
+                self.seek_in_progress = False
+                if self.tuned_irq:
+                    self.tuned_irq()
+            # Clear the interrupt flag
+            self.shadow_register[10] |= 0x0020
+            self._write_registers(10)
+        if status & 0x0001:  # RDS ready
+            if self.rds_irq:
+                self.rds_irq()
+            # Clear the interrupt flag
+            self.shadow_register[10] |= 0x0001
+            self._write_registers(10)
 
     def power_cristal(self, on=True):
         # Power up the crystal oscillator
         if on:
-            self.shadow_register[7] |= 0x8000  # Set XOSCEN bit
+            self.shadow_register[REG_TEST1] |= 0x8000  # Set XOSCEN bit
         else:
-            self.shadow_register[7] &= ~0x8000  # Clear XOSCEN bit
-        self.write_registers(7)
+            self.shadow_register[REG_TEST1] &= ~0x8000  # Clear XOSCEN bit
+        self._write_registers(REG_TEST1)
         if on:
             time.sleep(0.5)  # Wait for crystal to stabilize
 
     def mute(self, on=True):
         # Mute or unmute audio
         if on:
-            self.shadow_register[2] |= 0x4000  # Set DMUTE bit
+            self.shadow_register[REG_POWERCFG] |= 0x4000  # Set DMUTE bit
         else:
-            self.shadow_register[2] &= ~0x4000  # Clear DMUTE bit
-        self.write_registers(2)
+            self.shadow_register[REG_POWERCFG] &= ~0x4000  # Clear DMUTE bit
+        self._write_registers(REG_POWERCFG)
 
     def enable(self, on=True):
         # enable or disable chip
         if on:
-            self.shadow_register[2] |= 0x0001  # Set ENABLE bit
+            self.shadow_register[REG_POWERCFG] |= 0x0001  # Set ENABLE bit
         else:
-            self.shadow_register[2] &= ~0x0001  # Clear ENABLE bit
-        self.write_registers(2)
+            self.shadow_register[REG_POWERCFG] &= ~0x0001  # Clear ENABLE bit
+        self._write_registers(REG_POWERCFG)
 
     def set_frequency(self, frequency):
         # Set the frequency in MHz
         channel = int((frequency - 87.5) * 10)  # Assuming 100kHz spacing
-        self.shadow_register[3] |= channel & 0x03FF
-        self.shadow_register[3] |= 0x8000  # Set TUNE bit
-        self.write_registers(3)
+        self.shadow_register[REG_CHANNEL] |= 0x8000 + (channel & 0x03FF) # Set TUNE bit and channel
+        self._write_registers(REG_CHANNEL)
+
+    def set_volume(self, volume):
+        # Set volume level (0-15)
+        volume = max(0, min(15, volume))  # Clamp volume to 0-15
+        self.shadow_register[REG_SYSCONFIG2] = (self.shadow_register[REG_SYSCONFIG2] & ~0x000F) | volume
+        self._write_registers(REG_SYSCONFIG2)
+
+    def seek_all(self, rssi_min=20):
+        if not self.seek_in_progress:
+            # Start seek from lowest frequency
+            self.set_frequency(87.5)
+            self.seek_in_progress = True
+            #set interrupt flag for seek complete
+            if self.interrupt_pin:
+                self.shadow_register[10] |= 0x0020  # Enable SEEK complete interrupt
+                self._write_registers(10)
+            # set rssi minimum
+            self.shadow_register[REG_SYSCONFIG2] &= ~0x00FF  # Clear RSSI bits
+            self.shadow_register[REG_SYSCONFIG2] |= rssi_min<<8 # Set RSSI threshold
+            self._write_registers(REG_SYSCONFIG2)
+        # Seek upwards
+        self.shadow_register[REG_POWERCFG] |= 0x0700  # Set SEEKMODE, SEEK and SEEKUP bit
+        self._write_registers(REG_POWERCFG)
+
+
 
     def update_shadow_register(self, shad_reg, reg_no, low_bit, high_bit, value):
         # Added by Dave Jaffe
@@ -94,13 +160,28 @@ class SI4703:
         shad_reg[ind] = H
         shad_reg[ind + 1] = L
 
-    def read_registers(self):
-        temp = self.i2c.readfrom(I2C_ADDRESS, 32)
-        for i in range(16):
-            self.shadow_register[i] = (temp[2*i] << 8) | temp[2*i + 1]
+    def _read_registers(self, top_register=0x09):
+        if top_register > 0x0F:
+            raise ValueError("top_register must be between 0x00 and 0x0F")
 
-    def write_register(self, address, shad_reg, reg_no, low_bit, high_bit, value):
-        reg = i2c.read_i2c_block_data(address, shad_reg[0], 32)
-        shad_reg = reg[16:28]
-        self.update_shadow_register(shad_reg, reg_no, low_bit, high_bit, value)
-        i2c.write_i2c_block_data(address, shad_reg[0], shad_reg[1:])
+        nb_registers = 6+top_register+1 if top_register < 0x0a else top_register - 0x0a + 1
+        read_len = nb_registers * 2
+
+        # read starts at register 0x0A and reads 32 bytes (16 registers)
+        temp = self.i2c.readfrom(I2C_ADDRESS, read_len)
+        # temp[0-1] = Reg 0A, temp[2-3] = Reg 0B, ..., temp[30-31] = Reg 19
+        for i in range(nb_registers):
+            self.shadow_register[(i+0x0a)%16] = (temp[2*i] << 8) | temp[2*i + 1]
+
+    def _write_registers(self, top_register):
+        # Write registers from 0x02 up to top_register
+        if top_register < 2 or top_register > 7:
+            raise ValueError("top_register must be between 2 and 7")
+
+        # write starts at register 0x02 and writes up to register 0x07
+        temp = bytearray()
+        for i in range(2, top_register + 1):
+            temp.append(self.shadow_register[i] >> 8)    # High byte
+            temp.append(self.shadow_register[i] & 0x00FF)  # Low byte
+
+        self.i2c.writeto(I2C_ADDRESS, temp)
