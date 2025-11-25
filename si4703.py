@@ -17,43 +17,85 @@ REG_RDSB = 0x0D
 REG_RDSC = 0x0E
 REG_RDSD = 0x0F
 
-class RadioText:
-    def __init__(self, version):
-        self.version = version
-        self.text = bytearray(64)
+
+class RDSB:
+    RDS_A = 0
+    RDS_B = 1
+    RDS_C = 2
+    RDS_D = 3
+
+
+
+class BasicTuning(RDSB):
+    def __init__(self):
+        self.text = bytearray(8) # max of 8 chars
         self.complete = False
         self.segments_received = set()
-        self.last_segment = 15 # default to max segments
 
-    def add_data_B(self, segment, blockD):
+    def process_data(self, block_kind, rds_blocks):
+        segment = rds_blocks[RDSB.RDS_B] & 0x03
         self.segments_received.add(segment)
-        index = segment * 2
-        c1 = (blockD >> 8) & 0xFF
-        self.text[index + 0] = c1
-        c2 = blockD & 0xFF
-        self.text[index + 1] = c2
-        # check for end of text
-        if c1 == 0x0D or c2 == 0x0D or (c1 == 0x020 and c2 == 0x020):
-            self.last_segment = segment
+        self._add_data(segment*2, rds_blocks[RDSB.RDS_D])
+
+        # check if we have all blocks
         if len(self.segments_received) >= self.last_segment + 1:
             self.complete = True
 
-    def add_data_A(self, segment, blockC, blockD):
-        self.segments_received.add(segment)
-        index = segment * 4
-        c1 = (blockC >> 8) & 0xFF
+    def _add_data(self, index, block):
+        c1 = (block >> 8) & 0xFF
         self.text[index] = c1
-        c2 = blockC & 0xFF
+        c2 = block & 0xFF
         self.text[index + 1] = c2
-        c3 = (blockD >> 8) & 0xFF
-        self.text[index + 2] = c3
-        c4 = blockD & 0xFF
-        self.text[index + 3] = c4
+        return c1, c2
+
+    def get_text(self):
+        res = self.text.decode("utf-8")
+        return res
+
+class RadioText(BasicTuning):
+    def __init__(self, version):
+        super().__init__()
+        self.version = version
+        self.text = bytearray(64)   # 16 * 4 bytes max
+        self.last_segment = 15 # default to max segments
+
+    def process_data(self, block_kind, rds_blocks):
+        segment = rds_blocks[RDSB.RDS_B] & 0x0F
+        if block_kind == 0:  # Text A
+            # Each segment has 4 characters (2 from block C, 2 from block D
+            self.radio_text._add_data_A(segment, rds_blocks[RDSB.RDS_C], rds_blocks[RDSB.RDS_D])
+        else: # Text B
+            # Each segment has 2 characters from block D
+            self.radio_text._add_data_B(segment, rds_blocks[RDSB.RDS_D])
+
+        self.segments_received.add(segment)
+
+        # check if we have all blocks
+        if len(self.segments_received) >= self.last_segment + 1:
+            self.complete = True
+
+    def _add_data_A(self, segment, blockC, blockD):
+        index = segment * 4
+        c1, c2 = self._add_data(index, blockC)
+        c3, c4 = self._add_data(index+2, blockD)
         # check for end of text
         if c1 == 0x0D or c2 == 0x0D or c3 == 0x0D or c4 == 0x0D or (c1 == 0x020 and c2 == 0x020 and c3 == 0x020 and c4 == 0x020):
             self.last_segment = segment
-        if len(self.segments_received) >= self.last_segment + 1:
-            self.complete = True
+            self.text = self.text[:4*(self.last_segment+1)]
+
+    def _add_data_B(self, segment, blockD):
+        index = segment * 2
+        c1, c2 = self._add_data(index, blockD)
+        # check for end of text
+        if c1 == 0x0D or c2 == 0x0D or (c1 == 0x020 and c2 == 0x020):
+            self.last_segment = segment
+            self.text = self.text[:2*(self.last_segment+1)]
+
+    def get_text(self):
+        res = self.text.decode("utf-8")
+        res = res.replace("/x0D", "")
+        res.rstrip()
+        return res
 
 class SI4703:
     def __init__(self, i2c_bus, reset_pin, interrupt_pin=None):
@@ -70,6 +112,7 @@ class SI4703:
         self.seek_found_frequency = None
 
         self.radio_text = None
+        self.basic_tuning = None
 
         # Reset the chip
         self.reset_pin.value(0)
@@ -100,16 +143,19 @@ class SI4703:
             block_type = (self.shadow_register[REG_RDSB] >> 12) & 0x0F
             block_kind = (self.shadow_register[REG_RDSB] >> 11) & 0x01
             block_version = (self.shadow_register[REG_RDSB] >> 4) & 0x01
+            # Basic tuning (0x00)
+            if block_type == 0x00:
+                if self.basic_tuning == None:
+                    self.basic_tuning = BasicTuning()
+                self.basic_tuning.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
+                if self.basic_tuning.complete:
+                    # Basic tuning complete
+                    pass # shall attach info to seek or tuned irq
             # Radio text only (0x02)
-            if block_type == 0x02:
-                segment = self.shadow_register[REG_RDSB] & 0x0F
+            elif block_type == 0x02:
                 if self.radio_text is None or self.radio_text.version != block_version:
                     self.radio_text = RadioText(block_version)
-                if block_kind == 0:  # Text A
-                    # Each segment has 4 characters (2 from block C, 2 from block D
-                    self.radio_text.add_data_A(segment, self.shadow_register[REG_RDSC], self.shadow_register[REG_RDSD])
-                else:
-                    self.radio_text.add_data_B(segment, self.shadow_register[REG_RDSD])
+                self.radio_text.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
                 if self.radio_text.complete:
                     # Radio text complete
                     pass # shall attach info to seek or tuned irq
