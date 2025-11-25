@@ -17,6 +17,44 @@ REG_RDSB = 0x0D
 REG_RDSC = 0x0E
 REG_RDSD = 0x0F
 
+class RadioText:
+    def __init__(self, version):
+        self.version = version
+        self.text = bytearray(64)
+        self.complete = False
+        self.segments_received = set()
+        self.last_segment = 15 # default to max segments
+
+    def add_data_B(self, segment, blockD):
+        self.segments_received.add(segment)
+        index = segment * 2
+        c1 = (blockD >> 8) & 0xFF
+        self.text[index + 0] = c1
+        c2 = blockD & 0xFF
+        self.text[index + 1] = c2
+        # check for end of text
+        if c1 == 0x0D or c2 == 0x0D or (c1 == 0x020 and c2 == 0x020):
+            self.last_segment = segment
+        if len(self.segments_received) >= self.last_segment + 1:
+            self.complete = True
+
+    def add_data_A(self, segment, blockC, blockD):
+        self.segments_received.add(segment)
+        index = segment * 4
+        c1 = (blockC >> 8) & 0xFF
+        self.text[index] = c1
+        c2 = blockC & 0xFF
+        self.text[index + 1] = c2
+        c3 = (blockD >> 8) & 0xFF
+        self.text[index + 2] = c3
+        c4 = blockD & 0xFF
+        self.text[index + 3] = c4
+        # check for end of text
+        if c1 == 0x0D or c2 == 0x0D or c3 == 0x0D or c4 == 0x0D or (c1 == 0x020 and c2 == 0x020 and c3 == 0x020 and c4 == 0x020):
+            self.last_segment = segment
+        if len(self.segments_received) >= self.last_segment + 1:
+            self.complete = True
+
 class SI4703:
     def __init__(self, i2c_bus, reset_pin, interrupt_pin=None):
         self.i2c = i2c_bus
@@ -26,9 +64,12 @@ class SI4703:
 
         self.rds_irq = None
         self.tuned_irq = None
+        self.seek_complete_irq = None
 
         self.seek_in_progress = False
         self.seek_found_frequency = None
+
+        self.radio_text = None
 
         # Reset the chip
         self.reset_pin.value(0)
@@ -53,27 +94,73 @@ class SI4703:
     def _irq_handler(self, pin):
         self._read_registers(REG_STATUSRSSI)
         status = self.shadow_register[REG_STATUSRSSI]
-        if status & 0x0020:  # Seek/Tune complete
+
+        if status & 0x8000:  # RDS ready
+            self._read_registers(REG_RDSD)
+            block_type = (self.shadow_register[REG_RDSB] >> 12) & 0x0F
+            block_kind = (self.shadow_register[REG_RDSB] >> 11) & 0x01
+            block_version = (self.shadow_register[REG_RDSB] >> 4) & 0x01
+            # Radio text only (0x02)
+            if block_type == 0x02:
+                segment = self.shadow_register[REG_RDSB] & 0x0F
+                if self.radio_text is None or self.radio_text.version != block_version:
+                    self.radio_text = RadioText(block_version)
+                if block_kind == 0:  # Text A
+                    # Each segment has 4 characters (2 from block C, 2 from block D
+                    self.radio_text.add_data_A(segment, self.shadow_register[REG_RDSC], self.shadow_register[REG_RDSD])
+                else:
+                    self.radio_text.add_data_B(segment, self.shadow_register[REG_RDSD])
+                if self.radio_text.complete:
+                    # Radio text complete
+                    pass # shall attach info to seek or tuned irq
+            if self.rds_irq:
+                self.rds_irq()
+            # Clear the interrupt flag
+            self.shadow_register[REG_STATUSRSSI] |= 0x8000
+            self._write_registers(REG_STATUSRSSI)
+
+        if status & 0x4000:  # Seek/Tune complete
             if self.seek_in_progress:
+                if status & 0x2000: # SEEK reached limit
+                    self.seek_in_progress = False
+                    if self.seek_complete_irq:
+                        self.seek_complete_irq(self.seek_found_frequency)
+                    # Clear the interrupt flag
+                    self.shadow_register[REG_POWERCFG] &= ~0x0100  # Clear SEEK bit
+                    self._write_registers(REG_POWERCFG)
+                    return
+
                 #get the found channel
                 self._read_registers(REG_READCHAN)
                 readchan = self.shadow_register[REG_READCHAN]
                 frequency = 87.5 + (readchan & 0x03FF) / 10.0
                 self.seek_found_frequency.append(frequency)
+
+                # Clear the interrupt flag
+                self.shadow_register[REG_POWERCFG] &= ~0x0100  # Clear SEEK bit
+                self._write_registers(REG_POWERCFG)
+
                 self.seek_all()  # continue seeking
             else:
                 self.seek_in_progress = False
+                # Clear the interrupt flag
+                self.shadow_register[REG_CHANNEL] &= ~0x8000  # Clear TUNE bit
+                self._write_registers(REG_CHANNEL)
+                #get the found channel
+                self._read_registers(REG_READCHAN)
+                readchan = self.shadow_register[REG_READCHAN]
+                frequency = 87.5 + (readchan & 0x03FF) / 10.0
                 if self.tuned_irq:
-                    self.tuned_irq()
-            # Clear the interrupt flag
-            self.shadow_register[10] |= 0x0020
-            self._write_registers(10)
-        if status & 0x0001:  # RDS ready
-            if self.rds_irq:
-                self.rds_irq()
-            # Clear the interrupt flag
-            self.shadow_register[10] |= 0x0001
-            self._write_registers(10)
+                    self.tuned_irq(frequency)
+
+    def set_rds_irq(self, handler):
+        self.rds_irq = handler
+
+    def set_tuned_irq(self, handler):
+        self.tuned_irq = handler
+
+    def set_seek_complete_irq(self, handler):
+        self.seek_complete_irq = handler
 
     def power_cristal(self, on=True):
         # Power up the crystal oscillator
