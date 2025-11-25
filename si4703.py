@@ -105,6 +105,7 @@ class SI4703:
         self.shadow_register = [0]*16
 
         self.rds_irq = None
+        self.basic_tuning_handler = None
         self.tuned_irq = None
         self.seek_complete_irq = None
 
@@ -124,15 +125,13 @@ class SI4703:
         # set initial configuration
         if self.interrupt_pin:
             self.interrupt_pin.irq(trigger=Pin.IRQ_FALLING, handler=self._irq_handler)
-            self.shadow_register[2] |= 0x0004  # Enable interrupt pin
-            self._write_registers(2)
-            self.shadow_register[10] |= 0x0040  # Enable interrupt
-            self._write_registers(10)
+            self.shadow_register[REG_SYSCONFIG1] |= 0xC004  # Enable interrupts and interrupt pin (GPIO2)
+            self._write_registers(REG_SYSCONFIG1)
 
         # Set europe config as default
-        self.shadow_register[2] |= 0x0800  # Set to De-emphasis 50us
-        self.shadow_register[5] |= 0x0010  # Set to 87.5MHz, 100kHz spacing
-        self._write_registers(2)
+        self.shadow_register[REG_POWERCFG] |= 0x0800  # Set to De-emphasis 50us
+        self.shadow_register[REG_SYSCONFIG2] |= 0x0010  # Set to 87.5MHz, 100kHz spacing
+        self._write_registers(REG_SYSCONFIG2) # write from REG_POWERCFG to REG_SYSCONFIG2
 
     def _irq_handler(self, pin):
         self._read_registers(REG_STATUSRSSI)
@@ -148,9 +147,8 @@ class SI4703:
                 if self.basic_tuning == None:
                     self.basic_tuning = BasicTuning()
                 self.basic_tuning.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
-                if self.basic_tuning.complete:
-                    # Basic tuning complete
-                    pass # shall attach info to seek or tuned irq
+                if self.basic_tuning.complete and self.basic_tuning_handler:
+                    self.basic_tuning_handler(self.basic_tuning.get_text())
             # Radio text only (0x02)
             elif block_type == 0x02:
                 if self.radio_text is None or self.radio_text.version != block_version:
@@ -186,7 +184,11 @@ class SI4703:
                 self.shadow_register[REG_POWERCFG] &= ~0x0100  # Clear SEEK bit
                 self._write_registers(REG_POWERCFG)
 
-                self.seek_all()  # continue seeking
+                self.radio_text = None
+                self.basic_tuning = None
+                self.enable_rds(True)  # re-enable RDS after seek
+
+                #self.seek_all()  # continue seeking
             else:
                 self.seek_in_progress = False
                 # Clear the interrupt flag
@@ -201,6 +203,9 @@ class SI4703:
 
     def set_rds_irq(self, handler):
         self.rds_irq = handler
+
+    def set_basic_tuning_handler(self, handler):
+        self.basic_tuning_handler = handler
 
     def set_tuned_irq(self, handler):
         self.tuned_irq = handler
@@ -246,8 +251,17 @@ class SI4703:
         self.shadow_register[REG_SYSCONFIG2] = (self.shadow_register[REG_SYSCONFIG2] & ~0x000F) | volume
         self._write_registers(REG_SYSCONFIG2)
 
+    def enable_rds(self, on=True):
+        # Enable or disable RDS
+        if on:
+            self.shadow_register[REG_SYSCONFIG1] |= 0x1000  # Set RDS bit
+        else:
+            self.shadow_register[REG_SYSCONFIG1] &= ~0x1000  # Clear RDS bit
+        self._write_registers(REG_SYSCONFIG1)
+
     def seek_all(self, rssi_min=20):
         if not self.seek_in_progress:
+            self.seek_found_frequency = []
             # Start seek from lowest frequency
             self.set_frequency(87.5)
             self.seek_in_progress = True
@@ -259,10 +273,18 @@ class SI4703:
             self.shadow_register[REG_SYSCONFIG2] &= ~0x00FF  # Clear RSSI bits
             self.shadow_register[REG_SYSCONFIG2] |= rssi_min<<8 # Set RSSI threshold
             self._write_registers(REG_SYSCONFIG2)
+        self.seek_up(False)
+
+    def seek_up(self, wrap=True):
         # Seek upwards
-        self.shadow_register[REG_POWERCFG] |= 0x0700  # Set SEEKMODE, SEEK and SEEKUP bit
+        self.shadow_register[REG_POWERCFG] |= 0x0300 + (0x0400 if wrap else 0x0000)  # Set SEEKMODE, SEEK and SEEKUP bit
         self._write_registers(REG_POWERCFG)
 
+    def seek_down(self):
+        # Seek downwards
+        self.shadow_register[REG_POWERCFG] &= ~0x0200  # Clear SEEKUP bit
+        self.shadow_register[REG_POWERCFG] |= 0x0500  # Set SEEKMODE and SEEK bit
+        self._write_registers(REG_POWERCFG)
 
 
     def update_shadow_register(self, shad_reg, reg_no, low_bit, high_bit, value):
