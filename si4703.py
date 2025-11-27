@@ -31,6 +31,7 @@ class BasicTuning(RDSB):
         self.text = bytearray(8) # max of 8 chars
         self.complete = False
         self.segments_received = set()
+        self.last_segment = 3  # default to max segments
 
     def process_data(self, block_kind, rds_blocks):
         segment = rds_blocks[RDSB.RDS_B] & 0x03
@@ -63,10 +64,10 @@ class RadioText(BasicTuning):
         segment = rds_blocks[RDSB.RDS_B] & 0x0F
         if block_kind == 0:  # Text A
             # Each segment has 4 characters (2 from block C, 2 from block D
-            self.radio_text._add_data_A(segment, rds_blocks[RDSB.RDS_C], rds_blocks[RDSB.RDS_D])
+            self._add_data_A(segment, rds_blocks[RDSB.RDS_C], rds_blocks[RDSB.RDS_D])
         else: # Text B
             # Each segment has 2 characters from block D
-            self.radio_text._add_data_B(segment, rds_blocks[RDSB.RDS_D])
+            self._add_data_B(segment, rds_blocks[RDSB.RDS_D])
 
         self.segments_received.add(segment)
 
@@ -81,7 +82,7 @@ class RadioText(BasicTuning):
         # check for end of text
         if c1 == 0x0D or c2 == 0x0D or c3 == 0x0D or c4 == 0x0D or (c1 == 0x020 and c2 == 0x020 and c3 == 0x020 and c4 == 0x020):
             self.last_segment = segment
-            self.text = self.text[:4*(self.last_segment+1)]
+            self.text = self.text[:4*(self.last_segment+1)+1]
 
     def _add_data_B(self, segment, blockD):
         index = segment * 2
@@ -98,7 +99,7 @@ class RadioText(BasicTuning):
         return res
 
 class SI4703:
-    def __init__(self, i2c_bus, reset_pin, interrupt_pin=None):
+    def __init__(self, i2c_bus, reset_pin, sen_pin, interrupt_pin=None):
         self.i2c = i2c_bus
         self.reset_pin = reset_pin
         self.interrupt_pin = interrupt_pin
@@ -115,11 +116,14 @@ class SI4703:
         self.radio_text = None
         self.basic_tuning = None
 
+        #sen_pin.value(1)    # Enable I2C mode
+        #Pin(2, Pin.OUT).value(0)
+
         # Reset the chip
-        self.reset_pin.value(0)
-        time.sleep(0.1)
-        self.reset_pin.value(1)
-        time.sleep(0.1)
+        #self.reset_pin.value(0)
+        #time.sleep(0.1)
+        #self.reset_pin.value(1)
+        #time.sleep(0.1)
         self._read_registers()
 
         # set initial configuration
@@ -129,7 +133,7 @@ class SI4703:
             self._write_registers(REG_SYSCONFIG1)
 
         # Set europe config as default
-        self.shadow_register[REG_POWERCFG] |= 0x0800  # Set to De-emphasis 50us
+        self.shadow_register[REG_SYSCONFIG1] |= 0x0800  # Set to De-emphasis 50us
         self.shadow_register[REG_SYSCONFIG2] |= 0x0010  # Set to 87.5MHz, 100kHz spacing
         self._write_registers(REG_SYSCONFIG2) # write from REG_POWERCFG to REG_SYSCONFIG2
 
@@ -160,8 +164,8 @@ class SI4703:
             if self.rds_irq:
                 self.rds_irq()
             # Clear the interrupt flag
-            self.shadow_register[REG_STATUSRSSI] |= 0x8000
-            self._write_registers(REG_STATUSRSSI)
+            #self.shadow_register[REG_STATUSRSSI] |= 0x8000
+            #self._write_registers(REG_STATUSRSSI)
 
         if status & 0x4000:  # Seek/Tune complete
             if self.seek_in_progress:
@@ -196,10 +200,9 @@ class SI4703:
                 self._write_registers(REG_CHANNEL)
                 #get the found channel
                 self._read_registers(REG_READCHAN)
-                readchan = self.shadow_register[REG_READCHAN]
-                frequency = 87.5 + (readchan & 0x03FF) / 10.0
+                frequency = 87.5 + (self.shadow_register[REG_READCHAN] & 0x03FF) / 10.0
                 if self.tuned_irq:
-                    self.tuned_irq(frequency)
+                    self.tuned_irq(frequency, self.shadow_register[REG_STATUSRSSI] & 0x03FF)
 
     def set_rds_irq(self, handler):
         self.rds_irq = handler
@@ -216,7 +219,7 @@ class SI4703:
     def power_cristal(self, on=True):
         # Power up the crystal oscillator
         if on:
-            self.shadow_register[REG_TEST1] |= 0x8000  # Set XOSCEN bit
+            self.shadow_register[REG_TEST1] |= 0x8100  # Set XOSCEN bit
         else:
             self.shadow_register[REG_TEST1] &= ~0x8000  # Clear XOSCEN bit
         self._write_registers(REG_TEST1)
@@ -225,10 +228,10 @@ class SI4703:
 
     def mute(self, on=True):
         # Mute or unmute audio
-        if on:
-            self.shadow_register[REG_POWERCFG] |= 0x4000  # Set DMUTE bit
-        else:
+        if on: 
             self.shadow_register[REG_POWERCFG] &= ~0x4000  # Clear DMUTE bit
+        else:
+            self.shadow_register[REG_POWERCFG] |= 0x4000  # Set DMUTE bit
         self._write_registers(REG_POWERCFG)
 
     def enable(self, on=True):
@@ -238,10 +241,13 @@ class SI4703:
         else:
             self.shadow_register[REG_POWERCFG] &= ~0x0001  # Clear ENABLE bit
         self._write_registers(REG_POWERCFG)
+        if on:
+            time.sleep(0.1)  # Wait for powerup
 
     def set_frequency(self, frequency):
         # Set the frequency in MHz
-        channel = int((frequency - 87.5) * 10)  # Assuming 100kHz spacing
+        channel = int(frequency*10 - 875)  # Assuming 100kHz spacing
+        self.shadow_register[REG_CHANNEL] &= ~0x83FF  # Clear TUNE bit and channel
         self.shadow_register[REG_CHANNEL] |= 0x8000 + (channel & 0x03FF) # Set TUNE bit and channel
         self._write_registers(REG_CHANNEL)
 
@@ -286,6 +292,11 @@ class SI4703:
         self.shadow_register[REG_POWERCFG] |= 0x0500  # Set SEEKMODE and SEEK bit
         self._write_registers(REG_POWERCFG)
 
+    def get_rssi(self):
+        self._read_registers(REG_STATUSRSSI)
+        status = self.shadow_register[REG_STATUSRSSI]
+        rssi = status & 0x7F
+        return rssi
 
     def update_shadow_register(self, shad_reg, reg_no, low_bit, high_bit, value):
         # Added by Dave Jaffe
