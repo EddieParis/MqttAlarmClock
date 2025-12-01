@@ -80,7 +80,7 @@ class RadioText(BasicTuning):
         c1, c2 = self._add_data(index, blockC)
         c3, c4 = self._add_data(index+2, blockD)
         # check for end of text
-        if c1 == 0x0D or c2 == 0x0D or c3 == 0x0D or c4 == 0x0D or (c1 == 0x020 and c2 == 0x020 and c3 == 0x020 and c4 == 0x020):
+        if c1 == 0x0D or c2 == 0x0D or c3 == 0x0D or c4 == 0x0D: # or (c1 == 0x020 and c2 == 0x020 and c3 == 0x020 and c4 == 0x020):
             self.last_segment = segment
             self.text = self.text[:4*(self.last_segment+1)+1]
 
@@ -88,7 +88,7 @@ class RadioText(BasicTuning):
         index = segment * 2
         c1, c2 = self._add_data(index, blockD)
         # check for end of text
-        if c1 == 0x0D or c2 == 0x0D or (c1 == 0x020 and c2 == 0x020):
+        if c1 == 0x0D or c2 == 0x0D: # or (c1 == 0x020 and c2 == 0x020):
             self.last_segment = segment
             self.text = self.text[:2*(self.last_segment+1)]
 
@@ -109,6 +109,7 @@ class SI4703:
         self.basic_tuning_handler = None
         self.tuned_irq = None
         self.seek_complete_irq = None
+        self.radio_text_irq = None
 
         self.seek_in_progress = False
         self.seek_found_frequency = None
@@ -159,8 +160,7 @@ class SI4703:
                     self.radio_text = RadioText(block_version)
                 self.radio_text.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
                 if self.radio_text.complete:
-                    # Radio text complete
-                    pass # shall attach info to seek or tuned irq
+                    self.radio_text_irq(self.radio_text.get_text())
             if self.rds_irq:
                 self.rds_irq()
             # Clear the interrupt flag
@@ -198,11 +198,13 @@ class SI4703:
                 # Clear the interrupt flag
                 self.shadow_register[REG_CHANNEL] &= ~0x8000  # Clear TUNE bit
                 self._write_registers(REG_CHANNEL)
+                self.shadow_register[REG_POWERCFG] &= ~0x0100  # Clear SEEK bit
+                self._write_registers(REG_POWERCFG)
                 #get the found channel
                 self._read_registers(REG_READCHAN)
                 frequency = 87.5 + (self.shadow_register[REG_READCHAN] & 0x03FF) / 10.0
                 if self.tuned_irq:
-                    self.tuned_irq(frequency, self.shadow_register[REG_STATUSRSSI] & 0x03FF)
+                    self.tuned_irq(frequency, self.shadow_register[REG_STATUSRSSI] & 0xFF)
 
     def set_rds_irq(self, handler):
         self.rds_irq = handler
@@ -215,6 +217,9 @@ class SI4703:
 
     def set_seek_complete_irq(self, handler):
         self.seek_complete_irq = handler
+
+    def set_radio_text_irq(self, handler):
+        self.radio_text_irq = handler
 
     def power_cristal(self, on=True):
         # Power up the crystal oscillator
@@ -255,7 +260,8 @@ class SI4703:
         # Set volume level (0-15)
         volume = max(0, min(15, volume))  # Clamp volume to 0-15
         self.shadow_register[REG_SYSCONFIG2] = (self.shadow_register[REG_SYSCONFIG2] & ~0x000F) | volume
-        self._write_registers(REG_SYSCONFIG2)
+        self.shadow_register[REG_SYSCONFIG3] |= 0x0100  # Set VOLUME bit
+        self._write_registers(REG_SYSCONFIG3)
 
     def enable_rds(self, on=True):
         # Enable or disable RDS
@@ -273,8 +279,8 @@ class SI4703:
             self.seek_in_progress = True
             #set interrupt flag for seek complete
             if self.interrupt_pin:
-                self.shadow_register[10] |= 0x0020  # Enable SEEK complete interrupt
-                self._write_registers(10)
+                self.shadow_register[REG_SYSCONFIG1] |= 0x4000  # Enable SEEK complete interrupt
+                self._write_registers(REG_SYSCONFIG1)
             # set rssi minimum
             self.shadow_register[REG_SYSCONFIG2] &= ~0x00FF  # Clear RSSI bits
             self.shadow_register[REG_SYSCONFIG2] |= rssi_min<<8 # Set RSSI threshold
@@ -282,11 +288,17 @@ class SI4703:
         self.seek_up(False)
 
     def seek_up(self, wrap=True):
+        self.enable_rds(False)  # Disable RDS during seek
+        self.radio_text = None
+        self.basic_tuning = None
         # Seek upwards
         self.shadow_register[REG_POWERCFG] |= 0x0300 + (0x0400 if wrap else 0x0000)  # Set SEEKMODE, SEEK and SEEKUP bit
         self._write_registers(REG_POWERCFG)
 
     def seek_down(self):
+        self.enable_rds(False)  # Disable RDS during seek
+        self.radio_text = None
+        self.basic_tuning = None
         # Seek downwards
         self.shadow_register[REG_POWERCFG] &= ~0x0200  # Clear SEEKUP bit
         self.shadow_register[REG_POWERCFG] |= 0x0500  # Set SEEKMODE and SEEK bit
@@ -295,7 +307,7 @@ class SI4703:
     def get_rssi(self):
         self._read_registers(REG_STATUSRSSI)
         status = self.shadow_register[REG_STATUSRSSI]
-        rssi = status & 0x7F
+        rssi = status & 0xFF
         return rssi
 
     def update_shadow_register(self, shad_reg, reg_no, low_bit, high_bit, value):
