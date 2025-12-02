@@ -159,6 +159,7 @@ class SI4703:
                     text = self.basic_tuning.get_text()
                     if text != self.old_basic_tuning_string:
                         self.basic_tuning_handler(text)
+                        self.old_basic_tuning_string = text
                         self.basic_tuning = None
             # Radio text only (0x02)
             elif block_type == 0x02:
@@ -169,6 +170,7 @@ class SI4703:
                     text = self.radio_text.get_text()
                     if text != self.old_radio_text_string:
                         self.radio_text_irq(text)
+                        self.old_radio_text_string = text
                         self.radio_text = None
             if self.rds_irq:
                 self.rds_irq()

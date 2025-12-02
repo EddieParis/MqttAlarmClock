@@ -3,7 +3,7 @@ from machine import I2C, Pin, SPI
 import time
 import st7789
 import vga2_bold_16x32
-import vga2_16x16
+import vga2_8x8
 import ntptime
 import uasyncio as asyncio
 
@@ -18,7 +18,7 @@ import uasyncio as asyncio
 class Clock:
     def __init__(self, display):
         self.display = display
-        self.wakeup_time
+        self.wakeup_time = None
 
     async def update_time(self):
         while True:
@@ -79,13 +79,13 @@ class Application:
 
     def get_fg_bg_color(self):
         if self.selected:
-            return Application.foreground, Application.background
-        else:
             return Application.background, Application.foreground
+        else:
+            return Application.foreground, Application.background
 
     def print_mini(self):
         fg, bg = self.get_fg_bg_color()
-        self.display.text(vga2_16x16, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
+        self.display.text(vga2_8x8, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
 
 class RadioApp(Application):
 #    def __init__(self, display, radio):
@@ -102,13 +102,17 @@ class AlarmApp(Application):
 class ApplicationHandler:
     def __init__(self):
         self.rotary_flag = RotaryFlag()
-        self.push_button_flag = PushButtonFlag()
+        self.rotary_button_flag = PushButtonFlag()
+        self.ko_button_flag = PushButtonFlag()
 
         self.pin_a = Pin(26, Pin.IN)
         self.pin_b = Pin(25, Pin.IN)
-        self.push_button = Pin(33, Pin.IN)
+        self.rotary_button = Pin(33, Pin.IN)
         self.pin_a.irq(trigger=Pin.IRQ_FALLING, handler=self.rotary_handler)
-        self.push_button.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.push_button_handler)
+        self.rotary_button.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.rotary_button_handler)
+
+        self.pin_ko = Pin(32, Pin.IN)
+        self.pin_ko.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.ko_handler)
 
         spi = SPI(2, baudrate=40000000, polarity=1, phase=1, sck=Pin(16), mosi=Pin(17))
         self.display = st7789.ST7789(spi, 240, 320, reset=Pin(5, Pin.OUT), dc=Pin(18, Pin.OUT), backlight=Pin(19, Pin.OUT), rotation=1, color_order=st7789.RGB)
@@ -150,11 +154,14 @@ class ApplicationHandler:
         main_coords = Point(0, 100)
 
         self.apps = [ RadioApp("Radio", self.display, self.radio, main_coords, Point(240, 0), True ),
-                      AlarmApp("Alarm1", self.display, self.radio, main_coords, Point(240, 20), False ),
-                      AlarmApp("Alarm2", self.display, self.radio, main_coords, Point(240, 40), False ),
+                      AlarmApp("Alarm1", self.display, self.radio, main_coords, Point(240, 40), False ),
+                      AlarmApp("Alarm2", self.display, self.radio, main_coords, Point(240, 80), False ),
                     ]
 
-        for app in self.apps:
+        self.display.vline(238, 0, 240, st7789.WHITE)
+
+        for ctr, app in enumerate(self.apps):
+            self.display.hline(238, ctr*40, 42, st7789.WHITE)
             app.print_mini()
 
     def rotary_handler(self, pin):
@@ -167,16 +174,25 @@ class ApplicationHandler:
             print("Rotated counter-clockwise")
             self.rotary_flag.set_ccw()
 
-
-    def push_button_handler(self, pin):
-        global push_button_flag
+    def rotary_button_handler(self, pin):
         state = pin.value()
         if state == 0:
-            print("Push button pressed")
-            self.push_button_flag.set_pressed()
+            print("Rotary button pressed")
+            self.rotary_button_flag.set_pressed()
         else:
-            print("Push button released")
-            self.push_button_flag.set_released()
+            print("Rotary button released")
+            self.rotary_button_flag.set_released()
+
+    def ko_handler(self, pin):
+        state = pin.value()
+        if state == 0:
+            print("KO button pressed")
+            self.ko_button_flag.set_pressed()
+            # Implement KO button functionality here
+        else:
+            print("KO button released")
+            self.ko_button_flag.set_released()
+            # Implement KO button release functionality here
 
     def tuned_handler(self, frequency, rssi):
         print("Tuned to frequency: {:.1f} MHz, RSSI: {}".format(frequency, rssi))
@@ -209,20 +225,31 @@ class ApplicationHandler:
                 print("Rotary event: counter-clockwise")
                 self.radio.seek_down()
 
-    async def push_button_task(self):
+    async def rotary_button_task(self):
         while True:
-            await self.push_button_flag.wait()
-            if push_button_flag.pressed:
-                print("Push button event: pressed")
+            await self.rotary_button_flag.wait()
+            if self.rotary_button_flag.pressed:
+                print("Rotary button event: pressed")
                 self.radio.mute(True)
             else:
-                print("Push button event: released")
+                print("Rotary button event: released")
                 self.radio.mute(False)
+
+    async def ko_button_task(self):
+        while True:
+            await self.ko_button_flag.wait()
+            if self.ko_button_flag.pressed:
+                print("KO button event: pressed")
+                # Implement KO button functionality here
+            else:
+                print("KO button event: released")
+                # Implement KO button release functionality here
 
     async def main(self):
         asyncio.create_task(self.clock.update_time())
         asyncio.create_task(self.rotary_task())
-        asyncio.create_task(self.push_button_task())
+        asyncio.create_task(self.rotary_button_task())
+        asyncio.create_task(self.ko_button_task())
         while True:
             await asyncio.sleep(1)
 
