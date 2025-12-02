@@ -117,6 +117,9 @@ class SI4703:
         self.radio_text = None
         self.basic_tuning = None
 
+        self.old_radio_text_string = ""
+        self.old_basic_tuning_string = ""
+
         #sen_pin.value(1)    # Enable I2C mode
         #Pin(2, Pin.OUT).value(0)
 
@@ -153,14 +156,20 @@ class SI4703:
                     self.basic_tuning = BasicTuning()
                 self.basic_tuning.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
                 if self.basic_tuning.complete and self.basic_tuning_handler:
-                    self.basic_tuning_handler(self.basic_tuning.get_text())
+                    text = self.basic_tuning.get_text()
+                    if text != self.old_basic_tuning_string:
+                        self.basic_tuning_handler(text)
+                        self.basic_tuning = None
             # Radio text only (0x02)
             elif block_type == 0x02:
                 if self.radio_text is None or self.radio_text.version != block_version:
                     self.radio_text = RadioText(block_version)
                 self.radio_text.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
-                if self.radio_text.complete:
-                    self.radio_text_irq(self.radio_text.get_text())
+                if self.radio_text.complete and self.radio_text_irq:
+                    text = self.radio_text.get_text()
+                    if text != self.old_radio_text_string:
+                        self.radio_text_irq(text)
+                        self.radio_text = None
             if self.rds_irq:
                 self.rds_irq()
             # Clear the interrupt flag
