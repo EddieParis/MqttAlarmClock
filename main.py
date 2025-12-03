@@ -7,6 +7,8 @@ import vga2_8x8
 import ntptime
 import uasyncio as asyncio
 
+from collections import deque
+
 # display
 # BLK 19
 # A 26
@@ -14,6 +16,22 @@ import uasyncio as asyncio
 # push 33
 # KO 32
 
+class Events:
+    ROT_CW = 0
+    ROT_CCW = 1
+    ROT_PUSH = 2
+    ROT_REL = 3
+    KO_PUSH = 4
+    KO_REL = 5
+
+    def __init__(self):
+        self.queue = deque()
+
+    def push(self, event):
+        self.queue.append(event)
+
+    def pop(self):
+        return self.queue.popleft()
 
 class Clock:
     def __init__(self, display):
@@ -77,6 +95,9 @@ class Application:
         self.mini_coords = mini_coords
         self.selected = selected
 
+        if selected:
+            self.print_active()
+
     def get_fg_bg_color(self):
         if self.selected:
             return Application.background, Application.foreground
@@ -85,7 +106,9 @@ class Application:
 
     def print_mini(self):
         fg, bg = self.get_fg_bg_color()
-        self.display.text(vga2_8x8, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
+        self.fill_rect(self.mini_coords.x+2, self.mini_coords.y-2, 318-self.mini_coords.x, 36, bg)
+        self.display.text(vga2_8x8, self.name, self.mini_coords.x+2, self.mini_coords.y-2, fg, bg)
+        self.display()
 
 class RadioApp(Application):
 #    def __init__(self, display, radio):
@@ -94,10 +117,29 @@ class RadioApp(Application):
     async def event(self):
         pass
 
+    def print_active(self):
+        self.display.text(vga2_8x8, "    seek    manual   favorites", 0, 0, Application.foreground)
+
 class AlarmApp(Application):
+
+    def __init__(self, name, display, radio, main_coords, mini_coords, selected):
+        super().__init__(name, display, radio, main_coords, mini_coords, selected)
+        self.wakeup = None
+        self.active = False
 
     async def event(self):
         pass
+
+    def print_mini(self):
+        super().print_mini()
+        status = "--:--"
+        if self.wakeup:
+            status = "07:40"
+
+        status += " on" if self.active else " off"
+
+        fg, bg = self.get_fg_bg_color()
+        self.display(vga2_8x8, status, self.mini_coords.x+2, self.main_coords.y+8, fg, bg)
 
 class ApplicationHandler:
     def __init__(self):
@@ -142,6 +184,8 @@ class ApplicationHandler:
         i2c = I2C(1, scl=scl, sda=sda, freq=400000)
 
         self.radio = SI4703(i2c, reset_pin, sen_pin, irq_pin)
+
+        self.events = deque()
 
         try:
             ntptime.host = "fr.pool.ntp.org"
