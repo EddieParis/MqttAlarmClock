@@ -25,12 +25,14 @@ class Events:
     KO_REL = 5
 
     def __init__(self):
-        self.queue = deque()
+        self.queue = deque((), 10)
 
     def push(self, event):
         self.queue.append(event)
 
     def pop(self):
+        if len(self.queue) == 0:
+            return None
         return self.queue.popleft()
 
 class Clock:
@@ -106,19 +108,72 @@ class Application:
 
     def print_mini(self):
         fg, bg = self.get_fg_bg_color()
-        self.fill_rect(self.mini_coords.x+2, self.mini_coords.y-2, 318-self.mini_coords.x, 36, bg)
+        #self.display.fill_rect(self.mini_coords.x+2, self.mini_coords.y-2, 318-self.mini_coords.x, 36, bg)
         self.display.text(vga2_8x8, self.name, self.mini_coords.x+2, self.mini_coords.y-2, fg, bg)
-        self.display()
+        #self.display()
 
 class RadioApp(Application):
-#    def __init__(self, display, radio):
-#        super().__init__(display, radio)
+
+    def __init__(self, name, display, radio, main_coords, mini_coords, selected):
+        super().__init__(name, display, radio, main_coords, mini_coords, selected)
+        self.mode = None  # None, 0..2
+        self.modes = ["seek", "manual", "fav."]
+        self.pre_mode = 0
+        self.set_volume = False
 
     async def event(self):
         pass
 
     def print_active(self):
-        self.display.text(vga2_8x8, "    seek    manual   favorites", 0, 0, Application.foreground)
+        self.display.text(vga2_8x8, " seek  manual fav. ", 0, 0, Application.foreground)
+
+    def event(self, events):
+        event = events.pop()
+        while event is not None:
+            if self.mode == 0:  # seek
+                if event == Events.ROT_CW:
+                    if self.set_volume:
+                        self.radio.set_volume(self.radio.get_volume()+1)
+                    else:
+                        self.radio.seek_up()
+                elif event == Events.ROT_CCW:
+                    if self.set_volume:
+                        self.radio.set_volume(self.radio.get_volume()-1)
+                    else:
+                        self.radio.seek_down()
+                elif event == Events.ROT_PUSH:
+                    self.set_volume = True
+                elif event == Events.ROT_REL:
+                    self.set_volume = False
+                elif event == Events.KO_PUSH:
+                    self.mode = None
+            elif self.mode == 1:  # manual
+                pass
+            elif self.mode == 2:  # fav.
+                pass
+            else:
+                if event == Events.ROT_CW:
+                    self.pre_mode += 1
+                    if self.pre_mode > len(self.modes)-1:
+                        self.pre_mode = 0
+                    self.print_arrow_mode()
+                elif event == Events.ROT_CCW:
+                    self.pre_mode -= 1
+                    if self.pre_mode < 0:
+                        self.pre_mode = len(self.modes)-1
+                    self.print_arrow_mode()
+                elif event == Events.ROT_PUSH:
+                    self.mode = self.pre_mode
+            event = events.pop()
+
+    def print_arrow_mode(self):
+        x = 0
+        for ctr, mode in enumerate(self.modes):
+            if ctr == self.pre_mode:
+                self.display.text(vga2_8x8, "x", x, 10, Application.foreground)
+            else:
+                self.display.text(vga2_8x8, " ", x, 10, Application.foreground)
+            x += len(mode)*5*8 + 8*3
 
 class AlarmApp(Application):
 
@@ -139,7 +194,7 @@ class AlarmApp(Application):
         status += " on" if self.active else " off"
 
         fg, bg = self.get_fg_bg_color()
-        self.display(vga2_8x8, status, self.mini_coords.x+2, self.main_coords.y+8, fg, bg)
+        self.display.text(vga2_8x8, status, self.mini_coords.x+2, self.mini_coords.y+8, fg, bg)
 
 class ApplicationHandler:
     def __init__(self):
@@ -185,7 +240,7 @@ class ApplicationHandler:
 
         self.radio = SI4703(i2c, reset_pin, sen_pin, irq_pin)
 
-        self.events = deque()
+        self.events = Events()
 
         try:
             ntptime.host = "fr.pool.ntp.org"
@@ -256,7 +311,7 @@ class ApplicationHandler:
         self.radio.set_basic_tuning_handler(self.basic_tuning_handler)
         self.radio.set_radio_text_irq(self.radio_text_handler)
         self.radio.set_frequency(98.2)   # Set frequency to 98.2 MHz
-        self.radio.set_volume(15)         # Set volume to lowest level
+        self.radio.set_volume(1)         # Set volume to lowest level
         self.radio.mute(False)           # Unmute the audio
 
     async def rotary_task(self):
@@ -264,30 +319,33 @@ class ApplicationHandler:
             await self.rotary_flag.wait()
             if self.rotary_flag.cw:
                 print("Rotary event: clockwise")
-                self.radio.seek_up()
+                self.events.push(Events.ROT_CW)
             else:
                 print("Rotary event: counter-clockwise")
-                self.radio.seek_down()
+                self.events.push(Events.ROT_CCW)
+            self.apps[0].event(self.events)
 
     async def rotary_button_task(self):
         while True:
             await self.rotary_button_flag.wait()
             if self.rotary_button_flag.pressed:
                 print("Rotary button event: pressed")
-                self.radio.mute(True)
+                self.events.push(Events.ROT_PUSH)
             else:
                 print("Rotary button event: released")
-                self.radio.mute(False)
+                self.events.push(Events.ROT_REL)
+            self.apps[0].event(self.events)
 
     async def ko_button_task(self):
         while True:
             await self.ko_button_flag.wait()
             if self.ko_button_flag.pressed:
                 print("KO button event: pressed")
-                # Implement KO button functionality here
+                self.events.push(Events.KO_PUSH)
             else:
                 print("KO button event: released")
-                # Implement KO button release functionality here
+                self.events.push(Events.KO_REL)
+            self.apps[0].event(self.events)
 
     async def main(self):
         asyncio.create_task(self.clock.update_time())
