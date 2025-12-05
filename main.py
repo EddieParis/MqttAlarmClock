@@ -23,6 +23,8 @@ class Events:
     ROT_REL = 3
     KO_PUSH = 4
     KO_REL = 5
+    ROT_CW_FAST = 6
+    ROT_CCW_FAST = 7
 
     def __init__(self):
         self.queue = deque((), 10)
@@ -115,17 +117,26 @@ class Application:
 class RadioApp(Application):
 
     def __init__(self, name, display, radio, main_coords, mini_coords, selected):
-        super().__init__(name, display, radio, main_coords, mini_coords, selected)
         self.mode = None  # None, 0..2
         self.modes = ["seek", "manual", "fav."]
         self.pre_mode = 0
         self.set_volume = False
-
-    async def event(self):
-        pass
+        super().__init__(name, display, radio, main_coords, mini_coords, selected)
 
     def print_active(self):
-        self.display.text(vga2_8x8, " seek  manual fav. ", 0, 0, Application.foreground)
+        fg, bg = self.get_fg_bg_color()
+        #self.display.fill_rect(self.main_coords.x, self.main_coords.y, 238, 220, bg)
+        #self.display.text(vga2_8x8, "Radio", self.main_coords.x+2, self.main_coords.y+2, fg, bg)
+        self.print_modes()
+
+    def print_modes(self):
+        x = 0
+        for ctr, mode in enumerate(self.modes):
+            #for prev_mode in self.modes[:ctr]:
+            #    x += len(prev_mode)*8 + 16
+            self.display.text(vga2_8x8, mode, x, 10, Application.foreground)
+            x += len(mode)*8 + 16
+        self.print_arrow_mode()
 
     def event(self, events):
         event = events.pop()
@@ -148,7 +159,22 @@ class RadioApp(Application):
                 elif event == Events.KO_PUSH:
                     self.mode = None
             elif self.mode == 1:  # manual
-                pass
+                if event == Events.ROT_CW:
+                    if self.set_volume:
+                        self.radio.set_volume(self.radio.get_volume()+1)
+                    else:
+                        self.radio.set_frequency((int(10*self.radio.get_frequency())+1)/10)
+                elif event == Events.ROT_CCW:
+                    if self.set_volume:
+                        self.radio.set_volume(self.radio.get_volume()-1)
+                    else:
+                        self.radio.set_frequency((int(10*self.radio.get_frequency())-1)/10)
+                elif event == Events.ROT_PUSH:
+                    self.set_volume = True
+                elif event == Events.ROT_REL:
+                    self.set_volume = False
+                elif event == Events.KO_PUSH:
+                    self.mode = None
             elif self.mode == 2:  # fav.
                 pass
             else:
@@ -167,13 +193,13 @@ class RadioApp(Application):
             event = events.pop()
 
     def print_arrow_mode(self):
-        x = 0
+        x = 8*3
         for ctr, mode in enumerate(self.modes):
             if ctr == self.pre_mode:
-                self.display.text(vga2_8x8, "x", x, 10, Application.foreground)
+                self.display.text(vga2_8x8, "\x1e", x, 18, Application.foreground)
             else:
-                self.display.text(vga2_8x8, " ", x, 10, Application.foreground)
-            x += len(mode)*5*8 + 8*3
+                self.display.text(vga2_8x8, " ", x, 18, Application.foreground)
+            x += len(mode)*8
 
 class AlarmApp(Application):
 
@@ -252,15 +278,15 @@ class ApplicationHandler:
 
         main_coords = Point(0, 100)
 
-        self.apps = [ RadioApp("Radio", self.display, self.radio, main_coords, Point(240, 0), True ),
-                      AlarmApp("Alarm1", self.display, self.radio, main_coords, Point(240, 40), False ),
-                      AlarmApp("Alarm2", self.display, self.radio, main_coords, Point(240, 80), False ),
+        self.apps = [ RadioApp("Radio", self.display, self.radio, main_coords, Point(240, 10), True ),
+                      AlarmApp("Alarm1", self.display, self.radio, main_coords, Point(240, 50), False ),
+                      AlarmApp("Alarm2", self.display, self.radio, main_coords, Point(240, 94), False ),
                     ]
 
         self.display.vline(238, 0, 240, st7789.WHITE)
 
         for ctr, app in enumerate(self.apps):
-            self.display.hline(238, ctr*40, 42, st7789.WHITE)
+            self.display.hline(238, ctr*40, 82, st7789.WHITE)
             app.print_mini()
 
     def rotary_handler(self, pin):
@@ -268,6 +294,7 @@ class ApplicationHandler:
         b_state = self.pin_b.value()
         if a_state == 0 and b_state == 1:
             print("Rotated clockwise")
+            # self.rotary_flag.set_fast()
             self.rotary_flag.set_cw()
         elif a_state == 0 and b_state == 0:
             print("Rotated counter-clockwise")

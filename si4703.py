@@ -100,6 +100,7 @@ class RadioText(BasicTuning):
 
 class SI4703:
     def __init__(self, i2c_bus, reset_pin, sen_pin, interrupt_pin=None):
+
         self.i2c = i2c_bus
         self.reset_pin = reset_pin
         self.interrupt_pin = interrupt_pin
@@ -266,6 +267,13 @@ class SI4703:
         self.shadow_register[REG_CHANNEL] &= ~0x83FF  # Clear TUNE bit and channel
         self.shadow_register[REG_CHANNEL] |= 0x8000 + (channel & 0x03FF) # Set TUNE bit and channel
         self._write_registers(REG_CHANNEL)
+
+    def get_frequency(self):
+        # Get the current frequency in MHz
+        self._read_registers(REG_READCHAN)
+        readchan = self.shadow_register[REG_READCHAN]
+        frequency = 87.5 + (readchan & 0x03FF) / 10.0
+        return frequency
 
     def set_volume(self, volume):
         # Set volume level (0-15)
