@@ -277,12 +277,13 @@ class SI4703:
 
     def set_volume(self, volume):
         # Set volume level (0-15)
-        volume = max(0, min(31, volume))  # Clamp volume to 0-31
-        self.shadow_register[REG_SYSCONFIG2] = (self.shadow_register[REG_SYSCONFIG2] & ~0x000F) | volume
+        volume = max(0, min(30, volume))  # Clamp volume to 0-30
         if volume < 16:
             self.shadow_register[REG_SYSCONFIG3] |= 0x0100  # Set attenuation bit
         else:
             self.shadow_register[REG_SYSCONFIG3] &= ~0x0100  # CLR attenuation bit
+            volume -= 15 # adjust volume to 1-15 range
+        self.shadow_register[REG_SYSCONFIG2] = (self.shadow_register[REG_SYSCONFIG2] & ~0x000F) | volume
         self._write_registers(REG_SYSCONFIG3)
 
     def get_volume(self):
@@ -290,7 +291,7 @@ class SI4703:
         self._read_registers(REG_SYSCONFIG3)
         volume = self.shadow_register[REG_SYSCONFIG2] & 0x000F
         if (self.shadow_register[REG_SYSCONFIG3] & 0x0100) == 0: # if attenuation bit is clear
-            volume += 16
+            volume += 15
         return volume
 
     def enable_rds(self, on=True):
