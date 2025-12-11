@@ -50,10 +50,11 @@ class Application:
     background = st7789.BLACK
     foreground = st7789.WHITE
 
-    def __init__(self, name, display, radio, main_coords, mini_coords, modes=[]):
+    def __init__(self, name, main_app, main_coords, mini_coords, modes=[]):
         self.name = name
-        self.display = display
-        self.radio = radio
+        self.display = main_app.display
+        self.radio = main_app.radio
+        self.main_app = main_app
         self.main_coords = main_coords
         self.mini_coords = mini_coords
         self.selected = False
@@ -116,12 +117,13 @@ class Application:
                 if self.mode_index < 0:
                     self.mode_index = len(self.modes)-1
                 self.print_arrow_mode()
-            elif event.type == Event.ROT_PUSH:
+            elif event.type == Event.ROT_REL:
                 #switch mode
                 self.selected_mode = self.modes[self.mode_index]
                 self.selected_mode.selected = True
                 self.print_modes(selected=self.mode_index)
                 self.print_arrow_mode(clear_all=True)
+                self.handle_event(Event(Event.MODE_ENTER))
             elif event.type == Event.KO_PUSH:
                 self.display.fill_rect(0, 0, 237, 16, Application.background)
                 self.selected = False
@@ -139,71 +141,75 @@ class Mode:
             return None
         return self
 
+class RadioOn(Mode):
+    def __init__(self, main_app):
+        super().__init__("on")
+        self.radio = main_app.radio
+        self.main_app = main_app
+
+    def handle_event(self, event):
+        self.radio.mute(False)
+        self.main_app.radio_on = True
+        return None
+
+class RadioOff(Mode):
+    def __init__(self, main_app):
+        super().__init__("off")
+        self.radio = main_app.radio
+        self.main_app = main_app
+
+    def handle_event(self, event):
+        self.radio.mute(True)
+        self.main_app.radio_on = False
+        return None
+
 class RadioSeekMode(Mode):
-    def __init__(self, radio, display):
+    def __init__(self, main_app):
         super().__init__("seek")
-        self.set_volume = False
-        self.radio = radio
-        self.display = display
+        self.radio = main_app.radio
+        self.display = main_app.display
+        self.main_app = main_app
 
     def handle_event(self, event):
         if event.type == Event.ROT_CW:
-            if self.set_volume:
-                self.radio.set_volume(self.radio.get_volume()+1)
-            else:
-                self.radio.seek_up()
+            self.radio.seek_up()
         elif event.type == Event.ROT_CCW:
-            if self.set_volume:
-                self.radio.set_volume(self.radio.get_volume()-1)
-            else:
-                self.radio.seek_down()
-        elif event.type == Event.ROT_PUSH:
-            self.set_volume = True
-        elif event.type == Event.ROT_REL:
-            self.set_volume = False
+            self.radio.seek_down()
         elif event.type == Event.KO_PUSH:
             return None
         return self    
 
 class RadioManualMode(Mode):
-    def __init__(self, radio, display):
+    def __init__(self, main_app):
         super().__init__("manual")
-        self.radio = radio
-        self.display = display
-        self.set_volume = False
+        self.radio = main_app.radio
+        self.display = main_app.display
+        self.main_app = main_app
 
     def handle_event(self, event):
         if event.type == Event.ROT_CW:
-            if self.set_volume:
-                self.radio.set_volume(self.radio.get_volume()+1)
-            else:
-                self.radio.set_frequency((int(10*self.radio.get_frequency())+1)/10)
+            self.radio.set_frequency((int(10*self.radio.get_frequency())+1)/10)
         elif event.type == Event.ROT_CCW:
-            if self.set_volume:
-                self.radio.set_volume(self.radio.get_volume()-1)
-            else:
-                self.radio.set_frequency((int(10*self.radio.get_frequency())-1)/10)
-        elif event.type == Event.ROT_PUSH:
-            self.set_volume = True
-        elif event.type == Event.ROT_REL:
-            self.set_volume = False
+            self.radio.set_frequency((int(10*self.radio.get_frequency())-1)/10)
         elif event.type == Event.KO_PUSH:
             return None
         return self
 
 class RadioFavMode(Mode):
-    def __init__(self):
+    def __init__(self, main_app):
         super().__init__("fav.")
 
 
 class RadioApp(Application):
 
-    def __init__(self, name, display, radio, main_coords, mini_coords):
-        modes = [ RadioSeekMode(radio, display),
-                  RadioManualMode(radio, display),
-                  RadioFavMode()
+    def __init__(self, name, main_app, main_coords, mini_coords):
+        modes = [ RadioOn(main_app),
+                  RadioOff(main_app),
+                  RadioSeekMode(main_app),
+                  RadioManualMode(main_app),
+                  RadioFavMode(main_app)
                 ]
-        super().__init__(name, display, radio, main_coords, mini_coords, modes=modes)
+        super().__init__(name, main_app, main_coords, mini_coords, modes=modes)
 
 class AlarmOn(Mode):
     def __init__(self, alarm_app):
@@ -255,7 +261,7 @@ class AlarmSet(Mode):
                 self.minute -= 5 if event.fast else 1
                 if self.minute < 0:
                     self.minute = 59
-        elif event.type == Event.ROT_PUSH:
+        elif event.type == Event.ROT_REL:
             if self.setting_hour:
                 self.setting_hour = False
             else:
@@ -275,12 +281,12 @@ class AlarmSet(Mode):
 
 class AlarmApp(Application):
 
-    def __init__(self, name, display, radio, main_coords, mini_coords):
+    def __init__(self, name, main_app, main_coords, mini_coords):
         modes = [AlarmOn(self),
                  AlarmOff(self),
                  AlarmStation(self),
                  AlarmSet(self)]
-        super().__init__(name, display, radio, main_coords, mini_coords, modes=modes)
+        super().__init__(name, main_app, main_coords, mini_coords, modes=modes)
         self.wakeup = None
         self.active = False
 
@@ -350,15 +356,19 @@ class ApplicationHandler:
 
         main_coords = Point(0, 100)
 
-        self.apps = [ RadioApp("Radio", self.display, self.radio, main_coords, Point(240, 10) ),
-                      AlarmApp("Alarm1", self.display, self.radio, main_coords, Point(240, 50) ),
-                      AlarmApp("Alarm2", self.display, self.radio, main_coords, Point(240, 94) ),
+        self.apps = [ RadioApp("Radio", self, main_coords, Point(240, 10) ),
+                      AlarmApp("Alarm1", self, main_coords, Point(240, 50) ),
+                      AlarmApp("Alarm2", self, main_coords, Point(240, 94) ),
                     ]
 
         self.display.vline(238, 0, 240, st7789.WHITE)
 
         self.pre_app = 0
         self.selected_app = None
+
+        self.radio_on = False
+        self.setting_volume = False
+        self.volume_set = False
 
         for ctr, app in enumerate(self.apps):
             self.display.hline(238, ctr*40, 82, st7789.WHITE)
@@ -378,6 +388,34 @@ class ApplicationHandler:
     def handle_events(self):
         event = self.events.pop()
         while event is not None:
+            if self.radio_on:
+                # volume setting handling when radio is on
+                # priority over app handling
+                # pushing rotary button without rotation is considered as a normal click.
+                if event.type == Event.ROT_PUSH:
+                    self.setting_volume = True
+                    event = self.events.pop()
+                    continue
+                elif self.setting_volume:
+                    if event.type == Event.ROT_REL and self.volume_set:
+                        self.setting_volume = False
+                        self.volume_set = False
+                        event = self.events.pop()
+                        continue
+                    elif event.type == Event.ROT_REL:
+                        self.setting_volume = False
+                    elif event.type == Event.ROT_CW :
+                        # volume adjustment
+                        self.radio.set_volume(self.radio.get_volume() + 1)
+                        self.volume_set = True
+                        event = self.events.pop()
+                        continue
+                    elif event.type == Event.ROT_CCW:
+                        # volume adjustment
+                        self.radio.set_volume(self.radio.get_volume() - 1)
+                        self.volume_set = True
+                        event = self.events.pop()
+                        continue
             if self.selected_app is not None:
                 self.selected_app = self.selected_app.handle_event(event)
                 if self.selected_app is None:
@@ -394,12 +432,18 @@ class ApplicationHandler:
                         self.pre_app = len(self.apps)-1
                     self.print_arrow_app()
                 elif event.type == Event.ROT_PUSH:
-                    #switch app
-                    self.selected_app = self.apps[self.pre_app]
-                    self.selected_app.selected = True
-                    self.print_arrow_app(clear_all=True)
-                    self.selected_app.print_mini()
-                    self.selected_app.print_active()
+                    if self.radio_on:
+                        self.setting_volume = True
+                elif event.type == Event.ROT_REL:
+                    if self.setting_volume:
+                        self.setting_volume = False
+                    else:
+                        #switch app
+                        self.selected_app = self.apps[self.pre_app]
+                        self.selected_app.selected = True
+                        self.print_arrow_app(clear_all=True)
+                        self.selected_app.print_mini()
+                        self.selected_app.print_active()
             event = self.events.pop()
 
     def ko_handler(self, pin):

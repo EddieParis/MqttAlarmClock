@@ -10,6 +10,7 @@ class Event:
     TUNED = 6
     RDS_Basic_Tuning = 7
     RDS_Radio_Text = 8
+    MODE_ENTER = 9
 
     def __init__(self, event_type):
         self.type = event_type
