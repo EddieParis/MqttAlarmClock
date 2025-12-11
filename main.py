@@ -19,6 +19,10 @@ import uasyncio as asyncio
 # push 33
 # KO 32
 
+MINI_APP_X_MARGIN = 4
+MINI_APP_Y_MARGIN = 4
+MINI_APP_HEIGHT = 40
+MINI_APP_INNER_HEIGHT = MINI_APP_HEIGHT - 2*MINI_APP_Y_MARGIN
 
 class Clock:
     def __init__(self, display):
@@ -70,8 +74,8 @@ class Application:
 
     def print_mini(self):
         fg, bg = self.get_fg_bg_color()
-        #self.display.fill_rect(self.mini_coords.x+2, self.mini_coords.y-2, 318-self.mini_coords.x, 36, bg)
-        self.display.text(vga2_8x8, self.name, self.mini_coords.x+2, self.mini_coords.y-2, fg, bg)
+        self.display.fill_rect(self.mini_coords.x, self.mini_coords.y, 320-self.mini_coords.x-MINI_APP_X_MARGIN, MINI_APP_INNER_HEIGHT, bg)
+        self.display.text(vga2_8x8, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
         #self.display()
 
     def print_active(self):
@@ -211,6 +215,14 @@ class RadioApp(Application):
                 ]
         super().__init__(name, main_app, main_coords, mini_coords, modes=modes)
 
+    def print_mini(self):
+        super().print_mini()
+        status = "on vol: {:>2}".format(self.main_app.radio.get_volume()) if self.main_app.radio_on else "off"
+
+        fg, bg = self.get_fg_bg_color()
+        self.display.text(vga2_8x8, status, self.mini_coords.x, self.mini_coords.y+12, fg, bg)
+
+
 class AlarmOn(Mode):
     def __init__(self, alarm_app):
         super().__init__("on")
@@ -302,7 +314,7 @@ class AlarmApp(Application):
         status += " on" if self.active else " off"
 
         fg, bg = self.get_fg_bg_color()
-        self.display.text(vga2_8x8, status, self.mini_coords.x+2, self.mini_coords.y+8, fg, bg)
+        self.display.text(vga2_8x8, status, self.mini_coords.x, self.mini_coords.y+12, fg, bg)
 
 class ApplicationHandler:
     def __init__(self):
@@ -356,9 +368,9 @@ class ApplicationHandler:
 
         main_coords = Point(0, 100)
 
-        self.apps = [ RadioApp("Radio", self, main_coords, Point(240, 10) ),
-                      AlarmApp("Alarm1", self, main_coords, Point(240, 50) ),
-                      AlarmApp("Alarm2", self, main_coords, Point(240, 94) ),
+        self.apps = [ RadioApp("Radio", self, main_coords, Point(240+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN), ),
+                      AlarmApp("Alarm1", self, main_coords, Point(240+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT) ),
+                      AlarmApp("Alarm2", self, main_coords, Point(240+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT) ),
                     ]
 
         self.display.vline(238, 0, 240, st7789.WHITE)
@@ -371,7 +383,7 @@ class ApplicationHandler:
         self.volume_set = False
 
         for ctr, app in enumerate(self.apps):
-            self.display.hline(238, ctr*40, 82, st7789.WHITE)
+            self.display.hline(240, ctr*MINI_APP_HEIGHT, 80, st7789.WHITE)
             app.print_mini()
 
         self.print_arrow_app()
