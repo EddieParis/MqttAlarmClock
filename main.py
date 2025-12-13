@@ -1,3 +1,4 @@
+import json
 from si4703 import SI4703
 from rotary import RotaryEncoder
 from event import *
@@ -27,6 +28,11 @@ MINI_APP_Y_MARGIN = 4
 MINI_APP_HEIGHT = 40
 MINI_APP_INNER_HEIGHT = MINI_APP_HEIGHT - 2*MINI_APP_Y_MARGIN
 
+MAIN_AREA_X = 0
+MAIN_AREA_Y = 20
+MAIN_AREA_WIDTH = MINI_SPLIT_X
+MAIN_AREA_HEIGHT = 64
+
 class RadioHolder:
     def __init__(self, radio, radio_app):
         self.radio = radio
@@ -42,6 +48,7 @@ class RadioHolder:
         if self.delay_task is not None:
             self.delay_task.cancel()
             self.delay_task = None
+        self.radio_app.sleep_time = None
         if on:
             self.radio.mute(False)
             self.radio_on = True
@@ -51,11 +58,22 @@ class RadioHolder:
             self.radio_on = False
         self.radio_app.print_mini()
 
-    def delayed_off(self, delay_seconds):
-        async def delayed_task():
-            await asyncio.sleep(delay_seconds)
+    def delayed_off(self, delay_minutes):
+        self.radio_app.print_mini()
+        if self.delay_task is not None:
+            self.delay_task.cancel()
             self.delay_task = None
+        async def delayed_task():
+            while self.radio_app.sleep_time is None or self.radio_app.sleep_time > 0:
+                await asyncio.sleep(60)
+                if self.radio_app.sleep_time is not None:
+                    self.radio_app.sleep_time -= 1
+                    self.radio_app.print_mini()
+            self.delay_task = None
+            self.radio_app.sleep_time = None
+            self.radio_app.print_mini()
             self.set_radio_on(False)
+        self.radio_app.sleep_time = delay_minutes
         self.delay_task = asyncio.create_task(delayed_task())
 
 class Clock:
@@ -81,7 +99,7 @@ class Clock:
             await asyncio.sleep(1)
 
     def show_time(self, tm):
-        time_str = "{:02}:{:02}:{:02}".format(tm[3], tm[4], tm[5])
+        time_str = "{:02}:{:02}:{:02}".format(tm[3]+self.clock_app.zone, tm[4], tm[5])
         self.display.text(vga2_bold_16x32, time_str, 50, 200, st7789.WHITE, st7789.BLACK)
 
     async def volume_ramp_up_and_ring(self, alarm):
@@ -92,8 +110,7 @@ class Clock:
                 alarm.ringing = False
                 return
             self.radio_holder.set_volume(vol)
-            await asyncio.sleep(10)
-
+            await asyncio.sleep(5)
 
 class Point:
     def __init__(self, x, y):
@@ -114,9 +131,10 @@ class Application:
         self.modes = modes
         self.mode_index = 0
         self.selected_mode = None
+        self.need_save = False
 
-    def get_fg_bg_color(self):
-        if self.selected:
+    def get_fg_bg_color(self, alt=None):
+        if (alt is not None and alt) or (alt is None and self.selected):
             return Application.background, Application.foreground
         else:
             return Application.foreground, Application.background
@@ -125,7 +143,6 @@ class Application:
         fg, bg = self.get_fg_bg_color()
         self.display.fill_rect(self.mini_coords.x, self.mini_coords.y, 320-self.mini_coords.x-MINI_APP_X_MARGIN, MINI_APP_INNER_HEIGHT, bg)
         self.display.text(vga2_8x8, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
-        #self.display()
 
     def print_active(self):
         fg, bg = self.get_fg_bg_color()
@@ -145,8 +162,6 @@ class Application:
     def print_modes(self, selected=None):
         x = 0
         for ctr, mode in enumerate(self.modes):
-            #for prev_mode in self.modes[:ctr]:
-            #    x += len(prev_mode)*8 + 16
             if selected is not None and ctr == selected:
                 self.display.text(vga2_8x8, mode.name, x, 0, Application.background, Application.foreground)
             else:
@@ -158,7 +173,8 @@ class Application:
         if self.selected_mode is not None:
             self.selected_mode = self.selected_mode.handle_event(event)
             if self.selected_mode is None:
-                self.print_modes()
+                self.display.fill_rect(self.main_coords.x, self.main_coords.y, MAIN_AREA_WIDTH, MAIN_AREA_HEIGHT, Application.background)
+                self.print_mini()
         else:
             if event.type == Event.ROT_CW:
                 self.mode_index += 1
@@ -184,6 +200,19 @@ class Application:
                 self.print_arrow_mode(clear_all=True)
                 return None
         return self
+
+    def __setattr__(self, name, value):
+        if name in self.__dict__.get("saved_attributes", []):
+            self.need_save = True
+        return super().__setattr__(name, value)
+
+    def save_state(self):
+        return { attr: self.__dict__.get(attr) for attr in self.saved_attributes }
+
+    def load_state(self, state):
+        for key in state:
+            self.__setattr__(key, state.get(key, None))
+        self.need_save = False
 
 class Mode:
     def __init__(self, name):
@@ -244,12 +273,13 @@ class RadioSleepMode(Mode):
     def __init__(self, radio_app):
         super().__init__("sleep")
         self.radio_app = radio_app
-        self.display = radio_app.display
         self.sleep_times = [5, 10, 15, 30, 45, 60] # in minutes
-        self.sleep_index = -1
+        self.sleep_index = 0
 
     def handle_event(self, event):
-        if event.type == Event.ROT_CW:
+        if event.type == Event.MODE_ENTER:
+            self.print_sleep_time()
+        elif event.type == Event.ROT_CW:
             self.sleep_index += 1
             if self.sleep_index >= len(self.sleep_times):
                 self.sleep_index = 0
@@ -264,15 +294,17 @@ class RadioSleepMode(Mode):
             sleep_minutes = self.sleep_times[self.sleep_index]
             # Here you would implement the logic to start a sleep timer
             print("Radio will sleep in {} minutes".format(sleep_minutes))
+            self.radio_app.radio_holder.delayed_off(sleep_minutes)
             return None
         elif event.type == Event.KO_PUSH:
             return None
         return self
 
     def print_sleep_time(self):
-        sleep_str = "Sleep: {} min".format(self.sleep_times[self.sleep_index])
+        self.radio_app.display.text(vga2_bold_16x32, "Sleep:    min", self.radio_app.main_coords.x, self.radio_app.main_coords.y, Application.foreground)
+        time_str = "{:02}".format(self.sleep_times[self.sleep_index])
         fg, bg = self.radio_app.get_fg_bg_color()
-        self.display.text(vga2_8x8, sleep_str, self.radio_app.main_coords.x, self.radio_app.main_coords.y+30, fg, bg)
+        self.radio_app.display.text(vga2_bold_16x32, time_str, self.radio_app.main_coords.x+7*16, self.radio_app.main_coords.y, fg, bg)
 
 class RadioApp(Application):
 
@@ -284,6 +316,7 @@ class RadioApp(Application):
                   RadioManualMode(self),
                   RadioSleepMode(self)
                 ]
+        self.sleep_time = None
 
     def print_mini(self):
         super().print_mini()
@@ -292,6 +325,9 @@ class RadioApp(Application):
         fg, bg = self.get_fg_bg_color()
         self.display.text(vga2_8x8, status, self.mini_coords.x, self.mini_coords.y+12, fg, bg)
 
+        if self.sleep_time is not None:
+            sleep_str = " sleep:{:>2}m".format(self.sleep_time)
+            self.display.text(vga2_8x8, sleep_str, self.mini_coords.x, self.mini_coords.y+24, fg, bg)
 
 class AlarmOn(Mode):
     def __init__(self, alarm_app):
@@ -299,6 +335,8 @@ class AlarmOn(Mode):
         self.alarm_app = alarm_app
 
     def handle_event(self, event):
+        if self.alarm_app.wakeup is None:
+            return None
         self.alarm_app.active = True
         self.alarm_app.print_mini()
         return None
@@ -327,7 +365,9 @@ class AlarmSet(Mode):
         self.setting_hour = True
 
     def handle_event(self, event):
-        if event.type == Event.ROT_CW:
+        if event.type == Event.MODE_ENTER:
+            self.hour, self.minute = self.alarm_app.wakeup
+        elif event.type == Event.ROT_CW:
             if self.setting_hour:
                 self.hour += 5 if event.fast else 1
                 if self.hour > 23:
@@ -360,9 +400,46 @@ class AlarmSet(Mode):
         return self
 
     def print_time(self):
-        time_str = "{:02}:{:02}".format(self.hour, self.minute)
-        fg, bg = self.alarm_app.get_fg_bg_color()
-        self.alarm_app.display.text(vga2_bold_16x32, time_str, self.alarm_app.main_coords.x+50, self.alarm_app.main_coords.y+50, fg, bg)
+        self.alarm_app.display.text(vga2_bold_16x32, "Alarm: xx:xx", self.alarm_app.main_coords.x, self.alarm_app.main_coords.y, Application.foreground)
+        time_str = "{:02}".format(self.hour)
+        fg, bg = self.alarm_app.get_fg_bg_color(self.setting_hour)
+        self.alarm_app.display.text(vga2_bold_16x32, time_str, self.alarm_app.main_coords.x+7*16, self.alarm_app.main_coords.y, fg, bg)
+        time_str = "{:02}".format(self.minute)
+        fg, bg = self.alarm_app.get_fg_bg_color(not self.setting_hour)
+        self.alarm_app.display.text(vga2_bold_16x32, time_str, self.alarm_app.main_coords.x+10*16, self.alarm_app.main_coords.y, fg, bg)
+
+class AlarmSetVolume(Mode):
+    def __init__(self, alarm_app):
+        super().__init__("volume")
+        self.alarm_app = alarm_app
+        self.volume = 0
+
+    def handle_event(self, event):
+        if event.type == Event.MODE_ENTER:
+            self.volume = self.alarm_app.volume
+        elif event.type == Event.ROT_CW:
+            self.volume += 1 if not event.fast else 5
+            if self.volume > 30:
+                self.volume = 30
+        elif event.type == Event.ROT_CCW:
+            self.volume -= 1 if not event.fast else 5
+            if self.volume < 1:
+                self.volume = 1
+        elif event.type == Event.ROT_REL:
+            #finish setting
+            self.alarm_app.volume = self.volume
+            self.alarm_app.print_mini()
+            return None
+        elif event.type == Event.KO_PUSH:
+            return None
+        self.print_volume()
+        return self
+    
+    def print_volume(self):
+        self.alarm_app.display.text(vga2_bold_16x32, "Volume: ", self.alarm_app.main_coords.x, self.alarm_app.main_coords.y, Application.foreground)
+        vol_str = "{:>2}".format(self.volume)
+        fg, bg = self.alarm_app.get_fg_bg_color(True)
+        self.alarm_app.display.text(vga2_bold_16x32, vol_str, self.alarm_app.main_coords.x+8*16, self.alarm_app.main_coords.y, fg, bg)
 
 class AlarmApp(Application):
 
@@ -370,36 +447,70 @@ class AlarmApp(Application):
         modes = [AlarmOn(self),
                  AlarmOff(self),
                  AlarmStation(self),
-                 AlarmSet(self)]
+                 AlarmSet(self),
+                 AlarmSetVolume(self)]
         super().__init__(name, display, radio_holder, main_coords, mini_coords, modes=modes)
-        self.wakeup = None
+        self.wakeup = (0,0)
         self.active = False
+        self.volume = 12
+
         self.ringing = False
-        self.volume = 5
-        
-    #async def handle_event(self):
-    #    pass
+        self.saved_attributes = ["wakeup", "active", "volume"]
 
     def print_mini(self):
         super().print_mini()
         status = "--:--"
         if self.wakeup:
             status = "{:02}:{:02}".format(self.wakeup[0], self.wakeup[1])
-
-        status += " on" if self.active else " off"
-
         fg, bg = self.get_fg_bg_color()
         self.display.text(vga2_8x8, status, self.mini_coords.x, self.mini_coords.y+12, fg, bg)
 
-class ClockSetMode(Mode):
+        if self.active:
+            status = "on"
+            fg = st7789.RED
+        else:
+            status = "off"
+        self.display.text(vga2_8x8, status, self.mini_coords.x+8*6, self.mini_coords.y+12, fg, bg)
+
+
+class ClockZoneMode(Mode):
     def __init__(self, clock_app):
-        super().__init__("set")
+        super().__init__("zone")
         self.clock_app = clock_app
+
+    def handle_event(self, event):
+        if event.type == Event.MODE_ENTER:
+            self.zone = self.clock_app.zone
+        elif event.type == Event.ROT_CW:
+            self.zone += 1
+            if self.zone > 12:
+                self.zone = 12
+        elif event.type == Event.ROT_CCW:
+            self.zone -= 1
+            if self.zone < -12:
+                self.zone = -12
+        elif event.type == Event.ROT_REL:
+            self.clock_app.zone = self.zone
+            return None
+        elif event.type == Event.KO_PUSH:
+            return None
+        self.print_zone()
+        return self
+
+    def print_zone(self):
+        self.clock_app.display.text(vga2_bold_16x32, "Time zone: ", self.clock_app.main_coords.x, self.clock_app.main_coords.y, Application.foreground)
+        vol_str = "{:>+3d}".format(self.zone)
+        fg, bg = self.clock_app.get_fg_bg_color(True)
+        self.clock_app.display.text(vga2_bold_16x32, vol_str, self.clock_app.main_coords.x+11*16, self.clock_app.main_coords.y, fg, bg)
+       
 
 class ClockApp(Application):
     def __init__(self, name, display, radio_holder, main_coords, mini_coords):
-        modes = [ClockSetMode(self)]
+        modes = [ClockZoneMode(self)]
         super().__init__(name, display, radio_holder, main_coords, mini_coords, modes=modes)
+        self.zone = 0
+
+        self.saved_attributes = ["zone"]
 
 class ApplicationHandler:
     def __init__(self):
@@ -451,7 +562,7 @@ class ApplicationHandler:
 
         self.radio_holder = RadioHolder(self.radio, None)
 
-        main_coords = Point(0, 100)
+        main_coords = Point(MAIN_AREA_X, MAIN_AREA_Y)
 
         self.radio_app = RadioApp("Radio", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
         self.radio_holder.radio_app = self.radio_app
@@ -467,6 +578,13 @@ class ApplicationHandler:
                       clock_app
                     ]
 
+        for app in self.apps:
+            try:
+                with open("{}.json".format(app.name), "rt") as file:
+                    state = json.load(file)
+                    app.load_state(state)
+            except OSError as excp:
+                pass
 
         self.pre_app = 0
         self.selected_app = None
@@ -539,8 +657,12 @@ class ApplicationHandler:
                         event = self.events.pop()
                         continue
             if self.selected_app is not None:
+                app = self.selected_app # save app
                 self.selected_app = self.selected_app.handle_event(event)
                 if self.selected_app is None:
+                    if app.need_save:
+                        with open("{}.json".format(app.name), "wt") as file:
+                            json.dump(app.save_state(), file)
                     self.print_arrow_app()
             else:
                 if event.type == Event.ROT_CW:

@@ -93,7 +93,10 @@ class RadioText(BasicTuning):
             self.text = self.text[:2*(self.last_segment+1)]
 
     def get_text(self):
-        res = self.text.decode("utf-8")
+        try:
+            res = self.text.decode("utf-8")
+        except UnicodeError:
+            return None
         res = res.replace("/x0D", "")
         res.rstrip()
         return res
@@ -169,7 +172,7 @@ class SI4703:
                 self.radio_text.process_data(block_kind, self.shadow_register[REG_RDSA:REG_RDSD+1])
                 if self.radio_text.complete and self.radio_text_irq:
                     text = self.radio_text.get_text()
-                    if text != self.old_radio_text_string:
+                    if text is not None and text != self.old_radio_text_string:
                         self.radio_text_irq(text)
                         self.old_radio_text_string = text
                         self.radio_text = None
