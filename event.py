@@ -11,6 +11,8 @@ class Event:
     RDS_Basic_Tuning = 7
     RDS_Radio_Text = 8
     MODE_ENTER = 9
+    TIMEOUT = 10
+    SEEK_COMPLETE = 11
 
     def __init__(self, event_type):
         self.type = event_type

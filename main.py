@@ -96,10 +96,11 @@ class Clock:
                         print("Alarm ringing!")
                         # Here you would implement the logic to start the radio or sound the alarm
             self.show_time(tm)
-            await asyncio.sleep(1)
+            await asyncio.sleep_ms(1000-(utime.ticks_ms()%1000))
 
     def show_time(self, tm):
-        time_str = "{:02}:{:02}:{:02}".format(tm[3]+self.clock_app.zone, tm[4], tm[5])
+        hours = (tm[3]+self.clock_app.zone)%24
+        time_str = "{:02}:{:02}:{:02}".format(hours, tm[4], tm[5])
         self.display.text(vga2_bold_16x32, time_str, 50, 200, st7789.WHITE, st7789.BLACK)
 
     async def volume_ramp_up_and_ring(self, alarm):
@@ -175,6 +176,7 @@ class Application:
             if self.selected_mode is None:
                 self.display.fill_rect(self.main_coords.x, self.main_coords.y, MAIN_AREA_WIDTH, MAIN_AREA_HEIGHT, Application.background)
                 self.print_mini()
+                self.print_modes()
         else:
             if event.type == Event.ROT_CW:
                 self.mode_index += 1
@@ -268,6 +270,42 @@ class RadioManualMode(Mode):
 class RadioFavMode(Mode):
     def __init__(self, radio_app):
         super().__init__("fav")
+        self.radio = radio_app.radio_holder.radio
+        self.radio_app = radio_app
+        self.timer = None
+        self.stations = []
+
+    def handle_event(self, event):
+        print("event: ", event.type)
+        if event.type == Event.MODE_ENTER:
+            # shall set radio to off (mute)
+            self.radio.set_frequency(87.5)
+            self.radio.seek_all()
+        elif event.type == Event.TUNED:
+            self.radio.enable_rds(True)
+            self.timer = self.radio_app.main_app.set_timer(1)
+        elif event.type == Event.RDS_Basic_Tuning:
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+            self.stations.append([self.radio.get_frequency(), event.text, False])
+            print(self.stations[-1])
+            self.scan_continue()
+        elif event.type == Event.TIMEOUT:
+            self.stations.append([self.radio.get_frequency(), None, False])
+            print(self.stations[-1])
+            self.scan_continue()
+        elif event.type == Event.KO_REL:
+            self.radio.seek_stop()
+            return None
+        elif event.type == Event.SEEK_COMPLETE:
+            for station in self.stations:
+                print(station)
+        return self
+
+    def scan_continue(self):
+        self.radio.enable_rds(False)
+        self.radio.seek_up(False)
 
 class RadioSleepMode(Mode):
     def __init__(self, radio_app):
@@ -338,7 +376,6 @@ class AlarmOn(Mode):
         if self.alarm_app.wakeup is None:
             return None
         self.alarm_app.active = True
-        self.alarm_app.print_mini()
         return None
 
 class AlarmOff(Mode):
@@ -348,7 +385,6 @@ class AlarmOff(Mode):
 
     def handle_event(self, event):
         self.alarm_app.active = False
-        self.alarm_app.print_mini()
         return None
 
 class AlarmStation(Mode):
@@ -392,7 +428,6 @@ class AlarmSet(Mode):
                 #finish setting
                 self.alarm_app.wakeup = (self.hour, self.minute)
                 self.setting_hour = True
-                self.alarm_app.print_mini()
                 return None
         elif event.type == Event.KO_PUSH:
             return None
@@ -428,7 +463,6 @@ class AlarmSetVolume(Mode):
         elif event.type == Event.ROT_REL:
             #finish setting
             self.alarm_app.volume = self.volume
-            self.alarm_app.print_mini()
             return None
         elif event.type == Event.KO_PUSH:
             return None
@@ -566,6 +600,7 @@ class ApplicationHandler:
 
         self.radio_app = RadioApp("Radio", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
         self.radio_holder.radio_app = self.radio_app
+        self.radio_app.main_app = self
         alarm_app1 = AlarmApp("Alarm1", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
         alarm_app2 = AlarmApp("Alarm2", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
         clock_app = ClockApp("Clock", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
@@ -611,6 +646,12 @@ class ApplicationHandler:
             else:
                 self.display.text(vga2_8x8, " ", MINI_SPLIT_X-10, y, Application.foreground)
             y += MINI_APP_HEIGHT
+
+    def set_timer(self, delay):
+        async def async_delay_task(self, delay):
+            await asyncio.sleep(delay)
+            self.events.push(Event(Event.TIMEOUT))
+        return asyncio.create_task(async_delay_task(self, delay))
 
     def handle_events(self):
         event = self.events.pop()
@@ -713,12 +754,17 @@ class ApplicationHandler:
         print("RDS Radio Text: {}".format(text))
         self.events.push(RadioTextEvent(text))
 
+    def seek_complete_handler(self):
+        print("seek complete")
+        self.events.push(Event(Event.SEEK_COMPLETE))
+
     def start_radio(self):
         self.radio.power_cristal(True)
         self.radio.enable(True)
         self.radio.set_tuned_irq(self.tuned_handler)
         self.radio.set_basic_tuning_handler(self.basic_tuning_handler)
         self.radio.set_radio_text_irq(self.radio_text_handler)
+        self.radio.set_seek_complete_irq(self.seek_complete_handler)
         self.radio.mute(True)           # Mute the audio
         self.radio.set_frequency(98.2)   # Set frequency to 98.2 MHz
         self.radio.set_volume(1)         # Set volume to lowest level
