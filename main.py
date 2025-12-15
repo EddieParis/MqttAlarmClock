@@ -77,31 +77,35 @@ class RadioHolder:
         self.delay_task = asyncio.create_task(delayed_task())
 
 class Clock:
-    def __init__(self, display, radio_holder, alarms, clock_app):
+    def __init__(self, display, radio_holder, alarms, settings_app):
         self.display = display
         self.radio_holder = radio_holder
         self.alarms = alarms
-        self.clock_app = clock_app
+        self.settings_app = settings_app
 
     async def update_time(self):
         while True:
             curr_time = utime.time()
             tm = utime.localtime()
+            tm = self.apply_tz(tm)
             for alarm in self.alarms:
                 if alarm.active and alarm.wakeup is not None:
-                    if (tm[3], tm[4]) == alarm.wakeup and not alarm.ringing:
+                    if [tm[3], tm[4]] == alarm.wakeup and not alarm.ringing:
                         alarm.ringing = True
                         self.radio_holder.set_radio_on(True)
                         asyncio.create_task(self.volume_ramp_up_and_ring(alarm))
                         print("Alarm ringing!")
-                        # Here you would implement the logic to start the radio or sound the alarm
             self.show_time(tm)
             await asyncio.sleep_ms(1000-(utime.ticks_ms()%1000))
 
+    def apply_tz(self, tm):
+        tm = list(tm)
+        tm[3] = (tm[3]+self.settings_app.zone)%24
+        return tm
+
     def show_time(self, tm):
-        hours = (tm[3]+self.clock_app.zone)%24
-        time_str = "{:02}:{:02}:{:02}".format(hours, tm[4], tm[5])
-        self.display.text(vga2_bold_16x32, time_str, 50, 200, st7789.WHITE, st7789.BLACK)
+        time_str = "{:02}:{:02}:{:02}".format(tm[3], tm[4], tm[5])
+        self.display.text(vga2_bold_16x32, time_str, 50, 240-32, st7789.WHITE, st7789.BLACK)
 
     async def volume_ramp_up_and_ring(self, alarm):
         # Let it ring for 60 minutes
@@ -163,6 +167,7 @@ class Application:
     def print_modes(self, selected=None):
         x = 0
         for ctr, mode in enumerate(self.modes):
+            mode.pre_display_mode()
             if selected is not None and ctr == selected:
                 self.display.text(vga2_8x8, mode.name, x, 0, Application.background, Application.foreground)
             else:
@@ -220,6 +225,9 @@ class Mode:
     def __init__(self, name):
         self.name = name
 
+    def pre_display_mode(self):
+        pass
+
     def handle_event(self, event):
         if event.type == Event.KO_PUSH:
             return None
@@ -229,6 +237,12 @@ class RadioOnOff(Mode):
     def __init__(self, radio_app):
         super().__init__("on ")
         self.radio_app = radio_app
+
+    def pre_display_mode(self):
+        if self.radio_app.radio_holder.radio_on:
+            self.name = "off"
+        else:
+            self.name = "on "
 
     def handle_event(self, event):
         if self.radio_app.radio_holder.radio_on:
@@ -402,6 +416,7 @@ class AlarmSet(Mode):
 
     def handle_event(self, event):
         if event.type == Event.MODE_ENTER:
+            self.setting_hour = True
             self.hour, self.minute = self.alarm_app.wakeup
         elif event.type == Event.ROT_CW:
             if self.setting_hour:
@@ -426,7 +441,7 @@ class AlarmSet(Mode):
                 self.setting_hour = False
             else:
                 #finish setting
-                self.alarm_app.wakeup = (self.hour, self.minute)
+                self.alarm_app.wakeup = [self.hour, self.minute]
                 self.setting_hour = True
                 return None
         elif event.type == Event.KO_PUSH:
@@ -484,7 +499,7 @@ class AlarmApp(Application):
                  AlarmSet(self),
                  AlarmSetVolume(self)]
         super().__init__(name, display, radio_holder, main_coords, mini_coords, modes=modes)
-        self.wakeup = (0,0)
+        self.wakeup = [0,0]
         self.active = False
         self.volume = 12
 
@@ -506,15 +521,107 @@ class AlarmApp(Application):
             status = "off"
         self.display.text(vga2_8x8, status, self.mini_coords.x+8*6, self.mini_coords.y+12, fg, bg)
 
+def print_favorites(favorites, start, display, x, y, highlight_index = None):
+    for index in range(start, start+12, 2):
+        if index < len(favorites):
+            left = favorites[index][1] if favorites[index][1] is not None else "{:>4.1f}".format(favorites[index][0])
+            left_is_fav = favorites[index][2]
+            if highlight_index == index:
+                display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", left), x, y, Application.background, Application.foreground)
+            else:
+                display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", left), x, y, Application.foreground)
+            if index+1 < len(favorites):
+                right = favorites[index+1][1] if favorites[index+1][1] is not None else "{:>4.1f}".format(favorites[index+1][0])
+                right_is_fav = favorites[index+1][2]
+                if highlight_index == index+1:
+                    display.text(vga2_8x8, "{} {:>8}".format("\x03" if right_is_fav else " ", right), x+11*8, y, Application.background, Application.foreground)
+                else:
+                    display.text(vga2_8x8, "{} {:>8}".format("\x03" if right_is_fav else " ", right), x+11*8, y, Application.foreground)
+            else:
+                display.text(vga2_8x8, "          ", x+11*8, y, Application.foreground)
+            y += 10
+
+class SettingsFillFavMode(Mode):
+    def __init__(self, settings_app):
+        super().__init__("fill-fav")
+        self.radio = settings_app.radio_holder.radio
+        self.settings_app = settings_app
+        self.timer = None
+        self.stations = []
+        self.start = 0
+        self.seek_done = False
+        self.highlight = 0
+
+    def handle_event(self, event):
+        print("event: ", event.type)
+        if event.type == Event.MODE_ENTER:
+            # shall set radio to off (mute)
+            self.start = 0
+            self.seek_done = False
+            self.radio.seek_all()
+        elif event.type == Event.TUNED:
+            if not event.valid:
+                self.scan_continue()
+                return self
+            self.radio.enable_rds(True)
+            self.timer = self.settings_app.main_app.set_timer(1)
+        elif event.type == Event.RDS_Basic_Tuning:
+            if self.timer is not None:
+                self.timer.cancel()
+                self.timer = None
+            self.stations.append([self.radio.get_frequency(), event.text, False])
+            self.scan_continue()
+        elif event.type == Event.TIMEOUT:
+            self.stations.append([self.radio.get_frequency(), None, False])
+            self.scan_continue()
+        elif event.type == Event.KO_REL:
+            self.radio.seek_stop()
+            return None
+        elif event.type == Event.SEEK_COMPLETE:
+            for station in self.stations:
+                print(station)
+            self.seek_done = True
+            print_favorites(self.stations, 0, self.settings_app.display, 0, 32, self.highlight)
+        elif event.type == Event.ROT_CW:
+            if self.seek_done:
+                self.highlight += 1
+                if self.highlight >= len(self.stations):
+                    self.highlight = 0
+                print_favorites(self.stations, 0, self.settings_app.display, 0, 32, self.highlight)
+        elif event.type == Event.ROT_CCW:
+            if self.seek_done:
+                self.highlight -= 1
+                if self.highlight < 0:
+                    self.highlight = len(self.stations) - 1
+                print_favorites(self.stations, 0, self.settings_app.display, 0, 32, self.highlight)
+        return self
+
+    def scan_continue(self):
+        if len(self.stations) >= 12 and len(self.stations) % 2:
+            self.start += 2
+        print_favorites(self.stations, self.start, self.settings_app.display, 0, 32)
+        self.radio.enable_rds(False)
+        self.radio.seek_up(False)
+
+class SettingsFavMode(Mode):
+    def __init__(self, settings_app):
+        super().__init__("fav")
+        self.radio = settings_app.radio_holder.radio
+        self.radio_app = settings_app
+        self.timer = None
+        self.stations = []
+
+    def handle_event(self, event):
+        return None
 
 class ClockZoneMode(Mode):
-    def __init__(self, clock_app):
+    def __init__(self, settings_app):
         super().__init__("zone")
-        self.clock_app = clock_app
+        self.settings_app = settings_app
 
     def handle_event(self, event):
         if event.type == Event.MODE_ENTER:
-            self.zone = self.clock_app.zone
+            self.zone = self.settings_app.zone
         elif event.type == Event.ROT_CW:
             self.zone += 1
             if self.zone > 12:
@@ -524,7 +631,7 @@ class ClockZoneMode(Mode):
             if self.zone < -12:
                 self.zone = -12
         elif event.type == Event.ROT_REL:
-            self.clock_app.zone = self.zone
+            self.settings_app.zone = self.zone
             return None
         elif event.type == Event.KO_PUSH:
             return None
@@ -532,18 +639,18 @@ class ClockZoneMode(Mode):
         return self
 
     def print_zone(self):
-        self.clock_app.display.text(vga2_bold_16x32, "Time zone: ", self.clock_app.main_coords.x, self.clock_app.main_coords.y, Application.foreground)
+        self.settings_app.display.text(vga2_bold_16x32, "Time zone: ", self.settings_app.main_coords.x, self.settings_app.main_coords.y, Application.foreground)
         vol_str = "{:>+3d}".format(self.zone)
-        fg, bg = self.clock_app.get_fg_bg_color(True)
-        self.clock_app.display.text(vga2_bold_16x32, vol_str, self.clock_app.main_coords.x+11*16, self.clock_app.main_coords.y, fg, bg)
+        fg, bg = self.settings_app.get_fg_bg_color(True)
+        self.settings_app.display.text(vga2_bold_16x32, vol_str, self.settings_app.main_coords.x+11*16, self.settings_app.main_coords.y, fg, bg)
        
 
-class ClockApp(Application):
+class SettingsApp(Application):
     def __init__(self, name, display, radio_holder, main_coords, mini_coords):
-        modes = [ClockZoneMode(self)]
-        super().__init__(name, display, radio_holder, main_coords, mini_coords, modes=modes)
+        super().__init__(name, display, radio_holder, main_coords, mini_coords)
+        self.modes = [SettingsFavMode(self), SettingsFillFavMode(self), ClockZoneMode(self)]
         self.zone = 0
-
+        self.favorites = []
         self.saved_attributes = ["zone"]
 
 class ApplicationHandler:
@@ -603,14 +710,15 @@ class ApplicationHandler:
         self.radio_app.main_app = self
         alarm_app1 = AlarmApp("Alarm1", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
         alarm_app2 = AlarmApp("Alarm2", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
-        clock_app = ClockApp("Clock", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
+        settings_app = SettingsApp("Settings", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
 
-        self.clock = Clock(self.display, self.radio_holder, [alarm_app1, alarm_app2], clock_app)
-        
+        self.clock = Clock(self.display, self.radio_holder, [alarm_app1, alarm_app2], settings_app)
+        settings_app.main_app = self
+
         self.apps = [ self.radio_app,
                       alarm_app1,
                       alarm_app2,
-                      clock_app
+                      settings_app
                     ]
 
         for app in self.apps:
@@ -742,9 +850,9 @@ class ApplicationHandler:
             self.events.push(Event(Event.KO_REL))
             # Implement KO button release functionality here
 
-    def tuned_handler(self, frequency, rssi):
-        print("Tuned to frequency: {:.1f} MHz, RSSI: {}".format(frequency, rssi))
-        self.events.push(RadioTunedEvent(frequency, rssi))
+    def tuned_handler(self, frequency, rssi, valid):
+        print("Tuned to frequency: {:.1f} MHz, RSSI: {}, Valid {}".format(frequency, rssi, valid))
+        self.events.push(RadioTunedEvent(frequency, rssi, valid))
 
     def basic_tuning_handler(self, text):
         print("RDS Basic Tuning Text: {}".format(text))

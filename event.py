@@ -28,10 +28,11 @@ class EventRotCcwEvent(Event):
         self.fast = fast
 
 class RadioTunedEvent(Event):
-    def __init__(self, frequency, rssi):
+    def __init__(self, frequency, rssi, valid):
         super().__init__(Event.TUNED)
         self.frequency = frequency
         self.rssi = rssi
+        self.valid = valid
 
 class BasicTuningEvent(Event):
     def __init__(self, text):

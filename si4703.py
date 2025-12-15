@@ -208,7 +208,7 @@ class SI4703:
             self._read_registers(REG_READCHAN)
             frequency = 87.5 + (self.shadow_register[REG_READCHAN] & 0x03FF) / 10.0
             if self.tuned_irq:
-                self.tuned_irq(frequency, self.shadow_register[REG_STATUSRSSI] & 0xFF)
+                self.tuned_irq(frequency, self.shadow_register[REG_STATUSRSSI] & 0xFF, self.shadow_register[REG_STATUSRSSI]&0x1000 == 0)
 
     def set_rds_irq(self, handler):
         self.rds_irq = handler
@@ -296,6 +296,9 @@ class SI4703:
 
     def seek_all(self, rssi_min=20):
         if not self.seek_in_progress:
+            # set FM impulse detection
+            self.shadow_register[REG_SYSCONFIG3] &= ~0x000F
+            self.shadow_register[REG_SYSCONFIG3] |= ~0x0008
             # Start seek from lowest frequency
             self.set_frequency(87.5)
             self.seek_in_progress = True
