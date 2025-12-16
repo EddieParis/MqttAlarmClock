@@ -444,7 +444,7 @@ class AlarmSet(Mode):
             else:
                 #finish setting
                 self.alarm_app.wakeup = [self.hour, self.minute]
-                self.alamr_app.last_ring_date = [0,0,0] # reset last ring date
+                self.alarm_app.last_ring_date = [0,0,0] # reset last ring date
                 self.setting_hour = True
                 return None
         elif event.type == Event.KO_PUSH:
@@ -591,31 +591,34 @@ class FavSelectMode(Mode):
             # shall set radio to off (mute)
             self.start = 0
             self.highlight = 0
-            self.radio.seek_all()
-            self.stations = list(self.favorites_app.stations)
+            self.stations = list(self.favorites_app.favorites)
+            print_favorites(self.stations, self.start, self.favorites_app.display, 0, 32, self.highlight)
         elif event.type == Event.ROT_CW:
             self.highlight += 1
             if self.highlight >= len(self.stations):
                 self.highlight = 0
-            self.enable_rds(False)
-            self.radio.set_frequency(self.stations[self.highlight][0])
-            if self.highlight > MAX_FAVORITES / 2 and self.highlight % 2 == 0 and len(self.stations) - self.highlight < MAX_FAVORITES / 2:
+            self.radio.enable_rds(False)
+            if len(self.stations):
+                self.radio.set_frequency(self.stations[self.highlight][0])
+            if self.highlight > MAX_FAVORITES / 2 and self.highlight % 2 == 0 and not (len(self.stations) - self.highlight < MAX_FAVORITES / 2):
                 self.start = (self.highlight-6)
             print_favorites(self.stations, self.start, self.favorites_app.display, 0, 32, self.highlight)
         elif event.type == Event.ROT_CCW:
             self.highlight -= 1
             if self.highlight < 0:
                 self.highlight = len(self.stations) - 1
-            self.enable_rds(False)
-            self.radio.set_frequency(self.stations[self.highlight][0])
+            self.radio.enable_rds(False)
+            if len(self.stations):
+                self.radio.set_frequency(self.stations[self.highlight][0])
             if self.highlight > MAX_FAVORITES / 2 and self.highlight % 2 == 0:
                 self.start = (self.highlight-6)
             print_favorites(self.stations, self.start, self.favorites_app.display, 0, 32, self.highlight)
         elif event.type == Event.ROT_REL:
-            self.stations[self.highlight][2] = not self.stations[self.highlight][2]
-            print_favorites(self.stations, 0, self.favorites_app.display, 0, 32, self.highlight)
+            if len(self.stations):
+                self.stations[self.highlight][2] = not self.stations[self.highlight][2]
+            print_favorites(self.stations, self.start, self.favorites_app.display, 0, 32, self.highlight)
         elif event.type == Event.KO_REL:
-            self.favorites_app.stations = self.stations
+            self.favorites_app.favorites = self.stations
             return None
         elif event.type == Event.TUNED:
             self.radio.enable_rds(True)
@@ -666,8 +669,9 @@ class FavScanMode(Mode):
             for station in self.stations:
                 print(station)
             self.seek_done = True
-            print_favorites(self.stations, 0, self.favorites_app.display, 0, 32, self.highlight)
-
+            print_favorites(self.stations, 0, self.favorites_app.display, 0, 32)
+        elif event.type == Event.ROT_REL:
+            self.favorites_app.favorites = self.stations
         return self
 
     def scan_continue(self):
@@ -678,7 +682,7 @@ class FavScanMode(Mode):
         self.radio.seek_up(False)
 
 class FavoritesApp(Application):
-       def __init__(self, name, display, radio_holder, main_coords, mini_coords):
+    def __init__(self, name, display, radio_holder, main_coords, mini_coords):
         super().__init__(name, display, radio_holder, main_coords, mini_coords)
         self.modes = [FavSelectMode(self), FavScanMode(self)]
         self.favorites = []
@@ -780,14 +784,17 @@ class ApplicationHandler:
         alarm_app1 = AlarmApp("Alarm1", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
         alarm_app2 = AlarmApp("Alarm2", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
         favorites_app = FavoritesApp("Favorites", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
-        settings_app = SettingsApp("Settings", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
+        settings_app = SettingsApp("Settings", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 4*MINI_APP_HEIGHT))
 
         self.clock = Clock(self.display, self.radio_holder, [alarm_app1, alarm_app2], settings_app)
+
+        favorites_app.main_app = self
         settings_app.main_app = self
 
         self.apps = [ self.radio_app,
                       alarm_app1,
                       alarm_app2,
+                      favorites_app,
                       settings_app
                     ]
 
