@@ -11,6 +11,7 @@ import vga2_8x8
 import ntptime
 import utime
 import uasyncio as asyncio
+import micropython as upy
 
 # display
 # BLK 19
@@ -86,7 +87,7 @@ class Clock:
 
     async def update_time(self):
         while True:
-            curr_time = utime.time()
+            # print (upy.mem_info())
             tm = utime.localtime()
             tm = self.apply_tz(tm)
             for alarm in self.alarms:
@@ -290,38 +291,14 @@ class RadioFavMode(Mode):
         self.radio_app = radio_app
         self.timer = None
         self.stations = []
+        self.start = 0
+        self.highlight = 0
 
     def handle_event(self, event):
-        print("event: ", event.type)
         if event.type == Event.MODE_ENTER:
-            # shall set radio to off (mute)
-            self.radio.set_frequency(87.5)
-            self.radio.seek_all()
-        elif event.type == Event.TUNED:
-            self.radio.enable_rds(True)
-            self.timer = self.radio_app.main_app.set_timer(1)
-        elif event.type == Event.RDS_Basic_Tuning:
-            if self.timer is not None:
-                self.timer.cancel()
-                self.timer = None
-            self.stations.append([self.radio.get_frequency(), event.text, False])
-            print(self.stations[-1])
-            self.scan_continue()
-        elif event.type == Event.TIMEOUT:
-            self.stations.append([self.radio.get_frequency(), None, False])
-            print(self.stations[-1])
-            self.scan_continue()
-        elif event.type == Event.KO_REL:
-            self.radio.seek_stop()
-            return None
-        elif event.type == Event.SEEK_COMPLETE:
-            for station in self.stations:
-                print(station)
+            self.stations = filter(lambda x: x[2], self.favorites.filter())
+            print_favorites(self.stations, self.start, self.radio_app.display, self.radio_app.main_coords.x, self.radio_app.main_coords.y, self.highlight)
         return self
-
-    def scan_continue(self):
-        self.radio.enable_rds(False)
-        self.radio.seek_up(False)
 
 class RadioSleepMode(Mode):
     def __init__(self, radio_app):

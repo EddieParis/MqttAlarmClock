@@ -254,6 +254,9 @@ class SI4703:
             time.sleep(0.1)  # Wait for powerup
 
     def set_frequency(self, frequency):
+        self.enable_rds(False)
+        self.radio_text = None
+        self.basic_tuning = None
         # Set the frequency in MHz
         channel = int(frequency*10 - 875)  # Assuming 100kHz spacing
         self.shadow_register[REG_CHANNEL] &= ~0x83FF  # Clear TUNE bit and channel
