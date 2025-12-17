@@ -298,7 +298,8 @@ class RadioFavMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.MODE_ENTER:
-            self.stations = filter(lambda x: x[2], self.stations.filter())
+            self.stations = [[98.2, "  F. G.  ", True], [87.5, None, False]]
+            filter(lambda x: x[2], self.stations)
             display_stations(self.stations, self.start, self.radio_app.display, self.radio_app.main_coords.x, self.radio_app.main_coords.y, self.highlight, False)
         elif event.type == Event.ROT_CW:
             self.highlight += 1
@@ -532,14 +533,15 @@ def display_stations(favorites, start, display, x, y, highlight_index = None, sh
             display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", station), x, y, Application.foreground)
 
     ctr = 0
+    iter_fav = iter(favorites)
     while ctr != start:
-        fav = favorites.next()
+        fav = next(iter_fav)
         ctr += 1
     x_offset = 0
     y_offset = 0
-    while ctr < MAX_STATIONS:
+    while (ctr-start) < MAX_STATIONS:
         try:
-            fav = favorites.next()
+            fav = next(iter_fav)
             display_half(fav, x+x_offset, y+y_offset, ctr==highlight_index, show_hearts)
         except StopIteration:
             display.text(vga2_8x8, " "*11, x+x_offset, y+y_offset, Application.foreground)
@@ -548,6 +550,7 @@ def display_stations(favorites, start, display, x, y, highlight_index = None, sh
             y_offset += 10
         else:
             x_offset = 11*8
+        ctr += 1
 
     # for index in range(start, start+MAX_STATIONS, 2):
     #     if index < len(favorites):
