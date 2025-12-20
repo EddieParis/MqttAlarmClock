@@ -1,4 +1,5 @@
 import json
+import gc
 from si4703 import SI4703
 from rotary import RotaryEncoder
 from event import *
@@ -8,6 +9,7 @@ from machine import I2C, Pin, SPI
 import st7789
 import vga2_bold_16x32
 import vga2_8x8
+import vga2_8x16
 import ntptime
 import utime
 import uasyncio as asyncio
@@ -20,21 +22,26 @@ import micropython as upy
 # push 33
 # KO 32
 
-SCREEN_WIDTH = 320
-SCREEN_HEIGHT = 240
+SCREEN_WIDTH = const(320)
+SCREEN_HEIGHT = const(240)
 
-MINI_SPLIT_X = 240
-MINI_APP_X_MARGIN = 4
-MINI_APP_Y_MARGIN = 4
-MINI_APP_HEIGHT = 40
-MINI_APP_INNER_HEIGHT = MINI_APP_HEIGHT - 2*MINI_APP_Y_MARGIN
+MINI_SPLIT_X = const(240)
+MINI_APP_X_MARGIN = const(4)
+MINI_APP_Y_MARGIN = const(4)
+MINI_APP_HEIGHT = const(40)
+MINI_APP_INNER_HEIGHT = const(MINI_APP_HEIGHT - 2*MINI_APP_Y_MARGIN)
 
-MAIN_AREA_X = 0
-MAIN_AREA_Y = 20
-MAIN_AREA_WIDTH = MINI_SPLIT_X
-MAIN_AREA_HEIGHT = 64
+MAIN_AREA_X = const(0)
+MAIN_AREA_Y = const(32)
+MAIN_AREA_WIDTH = const(MINI_SPLIT_X)
+MAIN_AREA_HEIGHT = const(6*18)
 
-class RadioHolder:
+RADIO_NAME_X = const(120-2*16)
+RADIO_NAME_Y = const(SCREEN_HEIGHT-32-32-32)
+RADIO_TEXT_X = const(0)
+RADIO_TEXT_Y = const(SCREEN_HEIGHT-32-32)
+
+class RadioManager:
     def __init__(self, radio, radio_app):
         self.radio = radio
         self.radio_app = radio_app
@@ -83,9 +90,9 @@ class RadioHolder:
         self.delay_task = asyncio.create_task(delayed_task())
 
 class Clock:
-    def __init__(self, display, radio_holder, alarms, settings_app):
-        self.display = display
-        self.radio_holder = radio_holder
+    def __init__(self, main_app, radio_mgr, alarms, settings_app):
+        self.display = main_app.display
+        self.radio_mgr = radio_mgr
         self.alarms = alarms
         self.settings_app = settings_app
 
@@ -99,7 +106,7 @@ class Clock:
                     if [tm[3], tm[4]] == alarm.wakeup and alarm.last_ring_date != tm[:3] and not alarm.ringing:
                         alarm.last_ring_date = tm[:3]
                         alarm.ringing = True
-                        self.radio_holder.set_radio_on(True)
+                        self.radio_mgr.set_radio_on(True)
                         asyncio.create_task(self.volume_ramp_up_and_ring(alarm))
                         print("Alarm ringing!")
             self.show_time(tm)
@@ -111,17 +118,19 @@ class Clock:
         return tm
 
     def show_time(self, tm):
+        self.display.text(vga2_8x16, "{:02}/{:02}".format(tm[2], tm[1]), 16, 240-32, st7789.WHITE, st7789.BLACK)
+        self.display.text(vga2_8x16, " {:04}".format(tm[0]), 16, 240-16, st7789.WHITE, st7789.BLACK)
         time_str = "{:02}:{:02}:{:02}".format(tm[3], tm[4], tm[5])
-        self.display.text(vga2_bold_16x32, time_str, 50, 240-32, st7789.WHITE, st7789.BLACK)
+        self.display.text(vga2_bold_16x32, time_str, MINI_SPLIT_X-8*16-32, 240-32, st7789.WHITE, st7789.BLACK)
 
     async def volume_ramp_up_and_ring(self, alarm):
         # Let it ring for 60 minutes
-        self.radio_holder.delayed_off(60)
+        self.radio_mgr.delayed_off(60)
         for vol in range(1, alarm.volume + 1):
-            if not self.radio_holder.radio_on:
+            if not self.radio_mgr.radio_on:
                 alarm.ringing = False
                 return
-            self.radio_holder.set_volume(vol)
+            self.radio_mgr.set_volume(vol)
             await asyncio.sleep(5)
 
 class Point:
@@ -133,10 +142,11 @@ class Application:
     background = st7789.BLACK
     foreground = st7789.WHITE
 
-    def __init__(self, name, display, radio_holder, main_coords, mini_coords, modes=[]):
+    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords, modes=[]):
         self.name = name
-        self.display = display
-        self.radio_holder = radio_holder
+        self.main_app = main_app
+        self.display = main_app.display
+        self.radio_mgr = radio_mgr
         self.main_coords = main_coords
         self.mini_coords = mini_coords
         self.selected = False
@@ -155,12 +165,6 @@ class Application:
         fg, bg = self.get_fg_bg_color()
         self.display.fill_rect(self.mini_coords.x, self.mini_coords.y, 320-self.mini_coords.x-MINI_APP_X_MARGIN, MINI_APP_INNER_HEIGHT, bg)
         self.display.text(vga2_8x8, self.name, self.mini_coords.x, self.mini_coords.y, fg, bg)
-
-    def display_active(self):
-        fg, bg = self.get_fg_bg_color()
-        #self.display.fill_rect(self.main_coords.x, self.main_coords.y, 238, 220, bg)
-        #self.display.text(vga2_8x8, "Radio", self.main_coords.x+2, self.main_coords.y+2, fg, bg)
-        self.display_modes()
 
     def display_arrow_mode(self, clear_all=False):
         x = 8
@@ -225,7 +229,7 @@ class Application:
 
     def load_state(self, state):
         for key in state:
-            self.__setattr__(key, state.get(key, None))
+            self.__setattr__(key, state[key])
         self.need_save = False
 
 class Mode:
@@ -246,18 +250,18 @@ class RadioOnOff(Mode):
         self.radio_app = radio_app
 
     def pre_display_mode(self):
-        if self.radio_app.radio_holder.radio_on:
+        if self.radio_app.radio_mgr.radio_on:
             self.name = "off"
         else:
             self.name = "on "
 
     def handle_event(self, event):
-        if self.radio_app.radio_holder.radio_on:
+        if self.radio_app.radio_mgr.radio_on:
             self.name = "on "
-            self.radio_app.radio_holder.set_radio_on(False)
+            self.radio_app.radio_mgr.set_radio_on(False)
         else:
             self.name = "off"
-            self.radio_app.radio_holder.set_radio_on(True)
+            self.radio_app.radio_mgr.set_radio_on(True)
         return None
 
 class RadioSeekMode(Mode):
@@ -267,9 +271,9 @@ class RadioSeekMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.ROT_CW:
-            self.radio_app.radio_holder.radio.seek_up()
+            self.radio_app.radio_mgr.radio.seek_up()
         elif event.type == Event.ROT_CCW:
-            self.radio_app.radio_holder.radio.seek_down()
+            self.radio_app.radio_mgr.radio.seek_down()
         elif event.type == Event.KO_PUSH:
             return None
         return self    
@@ -281,9 +285,9 @@ class RadioManualMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.ROT_CW:
-            self.radio_app.radio_holder.radio.set_frequency((int(10*self.radio_app.radio_holder.radio.get_frequency())+1)/10)
+            self.radio_app.radio_mgr.radio.set_frequency((int(10*self.radio_app.radio_mgr.radio.get_frequency())+1)/10)
         elif event.type == Event.ROT_CCW:
-            self.radio_app.radio_holder.radio.set_frequency((int(10*self.radio_app.radio_holder.radio.get_frequency())-1)/10)
+            self.radio_app.radio_mgr.radio.set_frequency((int(10*self.radio_app.radio_mgr.radio.get_frequency())-1)/10)
         elif event.type == Event.KO_PUSH:
             return None
         return self
@@ -312,7 +316,7 @@ class RadioFavMode(Mode):
                 self.highlight = 0
             display_stations(self.stations, self.start, self.radio_app.display, self.radio_app.main_coords.x, self.radio_app.main_coords.y, self.highlight, False)
         elif event.type == Event.ROT_REL:
-            self.radio_app.radio_holder.tune_to(self.stations[self.highlight][0])
+            self.radio_app.radio_mgr.tune_to(self.stations[self.highlight][0])
         elif event.type == Event.KO_REL:
             return None
         return self
@@ -342,7 +346,7 @@ class RadioSleepMode(Mode):
             sleep_minutes = self.sleep_times[self.sleep_index]
             # Here you would implement the logic to start a sleep timer
             print("Radio will sleep in {} minutes".format(sleep_minutes))
-            self.radio_app.radio_holder.delayed_off(sleep_minutes)
+            self.radio_app.radio_mgr.delayed_off(sleep_minutes)
             return None
         elif event.type == Event.KO_PUSH:
             return None
@@ -356,8 +360,8 @@ class RadioSleepMode(Mode):
 
 class RadioApp(Application):
 
-    def __init__(self, name, display, radio_holder, main_coords, mini_coords):
-        super().__init__(name, display, radio_holder, main_coords, mini_coords)
+    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
+        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
         self.modes = [ RadioOnOff(self),
                   RadioFavMode(self),
                   RadioSeekMode(self),
@@ -368,7 +372,7 @@ class RadioApp(Application):
 
     def display_mini(self):
         super().display_mini()
-        status = "on vol:{:>2}".format(self.radio_holder.radio.get_volume()) if self.radio_holder.radio_on else "off"
+        status = "on vol:{:>2}".format(self.radio_mgr.radio.get_volume()) if self.radio_mgr.radio_on else "off"
 
         fg, bg = self.get_fg_bg_color()
         self.display.text(vga2_8x8, status, self.mini_coords.x, self.mini_coords.y+12, fg, bg)
@@ -439,7 +443,6 @@ class AlarmSet(Mode):
                 #finish setting
                 self.alarm_app.wakeup = [self.hour, self.minute]
                 self.alarm_app.last_ring_date = [0,0,0] # reset last ring date
-                self.setting_hour = True
                 return None
         elif event.type == Event.KO_PUSH:
             return None
@@ -489,19 +492,17 @@ class AlarmSetVolume(Mode):
 
 class AlarmApp(Application):
 
-    def __init__(self, name, display, radio_holder, main_coords, mini_coords):
+    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
         modes = [AlarmOn(self),
                  AlarmOff(self),
                  AlarmStation(self),
                  AlarmSet(self),
                  AlarmSetVolume(self)]
-        super().__init__(name, display, radio_holder, main_coords, mini_coords, modes=modes)
+        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords, modes=modes)
         self.wakeup = [0,0]
         self.active = False
         self.volume = 12
         self.last_ring_date = [0,0,0]
-
-
         self.ringing = False
         self.saved_attributes = ["wakeup", "active", "volume", "last_ring_date"]
 
@@ -520,7 +521,7 @@ class AlarmApp(Application):
             status = "off"
         self.display.text(vga2_8x8, status, self.mini_coords.x+8*6, self.mini_coords.y+12, fg, bg)
 
-MAX_STATIONS = 12
+MAX_STATIONS = const(12)
 
 def display_stations(favorites, start, display, x, y, highlight_index = None, show_hearts=True):
 
@@ -528,9 +529,11 @@ def display_stations(favorites, start, display, x, y, highlight_index = None, sh
         station = fav[1] if fav[1] is not None else "{:>4.1f}".format(fav[0])
         left_is_fav = fav[2] and show_hearts
         if highlight:
-            display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", station), x, y, Application.background, Application.foreground)
+            display.text(vga2_8x16, "{} {:>8}".format("\x03" if left_is_fav else " ", station), x, y, Application.background, Application.foreground)
         else:
-            display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", station), x, y, Application.foreground)
+            display.text(vga2_8x16, "{} {:>8}".format("\x03" if left_is_fav else " ", station), x, y, Application.foreground)
+
+    x += 16
 
     ctr = 0
     iter_fav = iter(favorites)
@@ -547,34 +550,15 @@ def display_stations(favorites, start, display, x, y, highlight_index = None, sh
             display.text(vga2_8x8, " "*11, x+x_offset, y+y_offset, Application.foreground)
         if x_offset != 0:
             x_offset = 0
-            y_offset += 10
+            y_offset += 18
         else:
-            x_offset = 11*8
+            x_offset = 12*8
         ctr += 1
-
-    # for index in range(start, start+MAX_STATIONS, 2):
-    #     if index < len(favorites):
-    #         left = favorites[index][1] if favorites[index][1] is not None else "{:>4.1f}".format(favorites[index][0])
-    #         left_is_fav = favorites[index][2]
-    #         if highlight_index == index:
-    #             display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", left), x, y, Application.background, Application.foreground)
-    #         else:
-    #             display.text(vga2_8x8, "{} {:>8}".format("\x03" if left_is_fav else " ", left), x, y, Application.foreground)
-    #         if index+1 < len(favorites):
-    #             right = favorites[index+1][1] if favorites[index+1][1] is not None else "{:>4.1f}".format(favorites[index+1][0])
-    #             right_is_fav = favorites[index+1][2]
-    #             if highlight_index == index+1:
-    #                 display.text(vga2_8x8, "{} {:>8}".format("\x03" if right_is_fav else " ", right), x+11*8, y, Application.background, Application.foreground)
-    #             else:
-    #                 display.text(vga2_8x8, "{} {:>8}".format("\x03" if right_is_fav else " ", right), x+11*8, y, Application.foreground)
-    #         else:
-    #             display.text(vga2_8x8, "          ", x+11*8, y, Application.foreground)
-    #         y += 10
 
 class FavSelectMode(Mode):
     def __init__(self, favorites_app):
         super().__init__("select")
-        self.radio = favorites_app.radio_holder.radio
+        self.radio = favorites_app.radio_mgr.radio
         self.favorites_app = favorites_app
         self.timer = None
         self.highlight = 0
@@ -628,7 +612,7 @@ class FavSelectMode(Mode):
 class FavScanMode(Mode):
     def __init__(self, favorites_app):
         super().__init__("scan")
-        self.radio = favorites_app.radio_holder.radio
+        self.radio = favorites_app.radio_mgr.radio
         self.favorites_app = favorites_app
         self.timer = None
         self.stations = []
@@ -676,8 +660,8 @@ class FavScanMode(Mode):
         self.radio.seek_up(False)
 
 class FavoritesApp(Application):
-    def __init__(self, name, display, radio_holder, main_coords, mini_coords):
-        super().__init__(name, display, radio_holder, main_coords, mini_coords)
+    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
+        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
         self.modes = [FavSelectMode(self), FavScanMode(self)]
         self.stations = []
         self.saved_attributes = ["stations"]
@@ -707,15 +691,15 @@ class ClockZoneMode(Mode):
         return self
 
     def display_zone(self):
-        self.settings_app.display.text(vga2_bold_16x32, "Time zone: ", self.settings_app.main_coords.x, self.settings_app.main_coords.y, Application.foreground)
+        self.settings_app.display.text(vga2_bold_16x32, b"Time zone: ", self.settings_app.main_coords.x, self.settings_app.main_coords.y, Application.foreground)
         vol_str = "{:>+3d}".format(self.zone)
         fg, bg = self.settings_app.get_fg_bg_color(True)
         self.settings_app.display.text(vga2_bold_16x32, vol_str, self.settings_app.main_coords.x+11*16, self.settings_app.main_coords.y, fg, bg)
        
 
 class SettingsApp(Application):
-    def __init__(self, name, display, radio_holder, main_coords, mini_coords):
-        super().__init__(name, display, radio_holder, main_coords, mini_coords)
+    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
+        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
         self.modes = [ClockZoneMode(self)]
         self.zone = 0
         self.saved_attributes = ["zone"]
@@ -768,22 +752,18 @@ class ApplicationHandler:
             print("Failed to sync time: {}".format(e))
 
 
-        self.radio_holder = RadioHolder(self.radio, None)
+        self.radio_mgr = RadioManager(self.radio, None)
 
         main_coords = Point(MAIN_AREA_X, MAIN_AREA_Y)
 
-        self.radio_app = RadioApp("Radio", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
-        self.radio_holder.radio_app = self.radio_app
-        self.radio_app.main_app = self
-        alarm_app1 = AlarmApp("Alarm1", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
-        alarm_app2 = AlarmApp("Alarm2", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
-        favorites_app = FavoritesApp("Favorites", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
-        settings_app = SettingsApp("Settings", self.display, self.radio_holder, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 4*MINI_APP_HEIGHT))
+        self.radio_app = RadioApp("Radio", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
+        self.radio_mgr.radio_app = self.radio_app
+        alarm_app1 = AlarmApp("Alarm1", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
+        alarm_app2 = AlarmApp("Alarm2", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
+        favorites_app = FavoritesApp("Favorites", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
+        settings_app = SettingsApp("Settings", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 4*MINI_APP_HEIGHT))
 
-        self.clock = Clock(self.display, self.radio_holder, [alarm_app1, alarm_app2], settings_app)
-
-        favorites_app.main_app = self
-        settings_app.main_app = self
+        self.clock = Clock(self, self.radio_mgr, [alarm_app1, alarm_app2], settings_app)
 
         self.apps = [ self.radio_app,
                       alarm_app1,
@@ -805,6 +785,10 @@ class ApplicationHandler:
 
         self.setting_volume = False
         self.volume_set = False
+
+        self.scroll_timer = None
+        self.scroll_text = ""
+        self.scroll_pos = 0
 
         # Initial display of apps with framing
         self.display.vline(MINI_SPLIT_X, 0, SCREEN_HEIGHT, st7789.WHITE)
@@ -832,22 +816,44 @@ class ApplicationHandler:
             self.events.push(Event(Event.TIMEOUT))
         return asyncio.create_task(async_delay_task(self, delay))
 
+    # def do_scroll_text(self):
+    #     async def scroll_timer_handler(self):
+    #         await asyncio.sleep(.5)
+    #         self.display.text(vga2_bold_16x32, self.scroll_text[self.scroll_pos:self.scroll_pos+14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
+    #         self.scroll_pos +=1
+    #         if self.scroll_pos > len(self.scroll_text):
+    #             self.scroll_pos = 0
+    #     return asyncio.create_task(scroll_timer_handler(self))
+
+    def post_exit_event(self):
+        self.events.push(Event(Event.EXIT))
+
     def handle_events(self):
         event = self.events.pop()
         while event is not None:
-            if self.radio_holder.radio_on:
+            if self.radio_mgr.radio_on:
                 if event.type == Event.TUNED:
                     self.radio.enable_rds(True)  # Enable RDS when tuned
-                    freq_str = "{:.1f} MHz".format(event.frequency)
-                    rssi_str = "RSSI: {}".format(event.rssi)
-                    self.display.fill_rect(50, 150, 200, 16, st7789.BLACK)
-                    self.display.text(vga2_8x8, freq_str, 50, 150, st7789.WHITE)
-                    self.display.fill_rect(50, 170, 200, 16, st7789.BLACK)
-                    self.display.text(vga2_8x8, rssi_str, 50, 170, st7789.WHITE)
+                    freq_str = "{:>5.1f} MHz".format(event.frequency)
+                    rssi_str = "{}".format(event.rssi)
+                    self.display.fill_rect(0, RADIO_NAME_Y, RADIO_NAME_X, 32, st7789.BLACK)
+                    self.display.text(vga2_8x16, freq_str, 0, RADIO_NAME_Y, st7789.WHITE)
+                    ctr = 0
+                    levels = [10, 20, 30, 40]
+                    while ctr < 4 and event.rssi >= levels[ctr]:
+                        self.display.vline(24+2*ctr, RADIO_NAME_Y+32-4-4*ctr, 4*ctr+4, Application.foreground)
+                        ctr += 1
+                    self.display.text(vga2_8x16, rssi_str, 0, RADIO_NAME_Y + 16, st7789.WHITE)
                 elif event.type == Event.RDS_Basic_Tuning:
-                    self.display.text(vga2_bold_16x32, event.text, 20, 130, st7789.WHITE, st7789.BLACK)
+                    self.display.text(vga2_bold_16x32, event.text, RADIO_NAME_X, RADIO_NAME_Y, st7789.WHITE, st7789.BLACK)
                 elif event.type == Event.RDS_Radio_Text:
-                    self.display.text(vga2_bold_16x32, event.text[:14], 0, 100, st7789.WHITE, st7789.BLACK)
+                    # if self.scroll_timer is not None:
+                    #     self.scroll_timer.cancel()
+                    # if len(event.text) > 14:
+                    #     self.scroll_text = str(event.text)+" "*14
+                    #     self.scroll_pos = 0
+                    #     self.do_scroll_text()
+                    self.display.text(vga2_bold_16x32, event.text[:14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
                 # volume setting handling when radio is on
                 # priority over app handling
                 # pushing rotary button without rotation is considered as a normal click.
@@ -866,13 +872,13 @@ class ApplicationHandler:
                         self.setting_volume = False
                     elif event.type == Event.ROT_CW :
                         # volume adjustment
-                        self.radio_holder.set_volume(self.radio.get_volume() + (1 if not event.fast else 5))
+                        self.radio_mgr.set_volume(self.radio.get_volume() + (1 if not event.fast else 5))
                         self.volume_set = True
                         event = self.events.pop()
                         continue
                     elif event.type == Event.ROT_CCW:
                         # volume adjustment
-                        self.radio_holder.set_volume(self.radio.get_volume() - (1 if not event.fast else 5))
+                        self.radio_mgr.set_volume(self.radio.get_volume() - (1 if not event.fast else 5))
                         self.volume_set = True
                         event = self.events.pop()
                         continue
@@ -883,6 +889,7 @@ class ApplicationHandler:
                     if app.need_save:
                         with open("{}.json".format(app.name), "wt") as file:
                             json.dump(app.save_state(), file)
+                        app.need_save = False
                     self.display_arrow_app()
             else:
                 if event.type == Event.ROT_CW:
@@ -896,7 +903,7 @@ class ApplicationHandler:
                         self.pre_app = len(self.apps)-1
                     self.display_arrow_app()
                 elif event.type == Event.ROT_PUSH:
-                    if self.radio_holder.radio_on:
+                    if self.radio_mgr.radio_on:
                         self.setting_volume = True
                 elif event.type == Event.ROT_REL:
                     if self.setting_volume:
@@ -907,7 +914,7 @@ class ApplicationHandler:
                         self.selected_app.selected = True
                         self.display_arrow_app(clear_all=True)
                         self.selected_app.display_mini()
-                        self.selected_app.display_active()
+                        self.selected_app.display_modes()
             event = self.events.pop()
 
     def ko_handler(self, pin):
@@ -962,5 +969,7 @@ class ApplicationHandler:
 
 app = ApplicationHandler()
 app.start_radio()
+
+gc.collect()
 
 asyncio.run(app.main())

@@ -1,18 +1,19 @@
 from collections import deque
 
 class Event:
-    ROT_CW = 0
-    ROT_CCW = 1
-    ROT_PUSH = 2
-    ROT_REL = 3
-    KO_PUSH = 4
-    KO_REL = 5
-    TUNED = 6
-    RDS_Basic_Tuning = 7
-    RDS_Radio_Text = 8
-    MODE_ENTER = 9
-    TIMEOUT = 10
-    SEEK_COMPLETE = 11
+    ROT_CW = const(0)
+    ROT_CCW = const(1)
+    ROT_PUSH = const(2)
+    ROT_REL = const(3)
+    KO_PUSH = const(4)
+    KO_REL = const(5)
+    TUNED = const(6)
+    RDS_Basic_Tuning = const(7)
+    RDS_Radio_Text = const(8)
+    MODE_ENTER = const(9)
+    TIMEOUT = const(10)
+    SEEK_COMPLETE = const(11)
+    EXIT = const(12)
 
     def __init__(self, event_type):
         self.type = event_type
