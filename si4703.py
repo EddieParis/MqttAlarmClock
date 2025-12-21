@@ -1,28 +1,28 @@
 import time
 from machine import Pin
 
-I2C_ADDRESS = 0x10
+I2C_ADDRESS = const(0x10)
 
-REG_DEVICE_ID = 0x00
-REG_POWERCFG = 0x02
-REG_CHANNEL = 0x03
-REG_SYSCONFIG1 = 0x04
-REG_SYSCONFIG2 = 0x05
-REG_SYSCONFIG3 = 0x06
-REG_TEST1 = 0x07
-REG_STATUSRSSI = 0x0A
-REG_READCHAN = 0x0B
-REG_RDSA = 0x0C
-REG_RDSB = 0x0D
-REG_RDSC = 0x0E
-REG_RDSD = 0x0F
+REG_DEVICE_ID = const(0x00)
+REG_POWERCFG = const(0x02)
+REG_CHANNEL = const(0x03)
+REG_SYSCONFIG1 = const(0x04)
+REG_SYSCONFIG2 = const(0x05)
+REG_SYSCONFIG3 = const(0x06)
+REG_TEST1 = const(0x07)
+REG_STATUSRSSI = const(0x0A)
+REG_READCHAN = const(0x0B)
+REG_RDSA = const(0x0C)
+REG_RDSB = const(0x0D)
+REG_RDSC = const(0x0E)
+REG_RDSD = const(0x0F)
 
 
 class RDSB:
-    RDS_A = 0
-    RDS_B = 1
-    RDS_C = 2
-    RDS_D = 3
+    RDS_A = const(0)
+    RDS_B = const(1)
+    RDS_C = const(2)
+    RDS_D = const(3)
 
 
 
