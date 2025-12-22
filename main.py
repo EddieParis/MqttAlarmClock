@@ -89,6 +89,10 @@ class RadioManager:
         self.radio_app.sleep_time = delay_minutes
         self.delay_task = asyncio.create_task(delayed_task())
 
+    def handle_event(self, event):
+        return event
+
+
 class Clock:
     def __init__(self, main_app, radio_mgr, alarms, settings_app):
         self.display = main_app.display
@@ -717,7 +721,7 @@ class ApplicationHandler:
         self.pin_ko = Pin(32, Pin.IN)
         self.pin_ko.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.ko_handler)
 
-        spi = SPI(2, baudrate=40000000, polarity=1, phase=1, sck=Pin(16), mosi=Pin(17))
+        spi = SPI(2, baudrate=4000000, polarity=1, phase=1, sck=Pin(16), mosi=Pin(17))
         # H W inverted, screen is rotated
         self.display = st7789.ST7789(spi, 240, 320, reset=Pin(5, Pin.OUT), dc=Pin(18, Pin.OUT), backlight=Pin(19, Pin.OUT), rotation=1, color_order=st7789.RGB)
         self.display.inversion_mode(False)
@@ -790,6 +794,8 @@ class ApplicationHandler:
         self.scroll_text = ""
         self.scroll_pos = 0
 
+        self.last_ko_state = 1
+
         # Initial display of apps with framing
         self.display.vline(MINI_SPLIT_X, 0, SCREEN_HEIGHT, st7789.WHITE)
         x = 0
@@ -816,14 +822,17 @@ class ApplicationHandler:
             self.events.push(Event(Event.TIMEOUT))
         return asyncio.create_task(async_delay_task(self, delay))
 
-    # def do_scroll_text(self):
-    #     async def scroll_timer_handler(self):
-    #         await asyncio.sleep(.5)
-    #         self.display.text(vga2_bold_16x32, self.scroll_text[self.scroll_pos:self.scroll_pos+14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
-    #         self.scroll_pos +=1
-    #         if self.scroll_pos > len(self.scroll_text):
-    #             self.scroll_pos = 0
-    #     return asyncio.create_task(scroll_timer_handler(self))
+    def do_scroll_text(self, first=False):
+        async def scroll_timer_handler(self, first):
+            self.display.text(vga2_bold_16x32, self.scroll_text[self.scroll_pos:self.scroll_pos+14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
+            await asyncio.sleep(2 if first else .250)
+            self.scroll_pos +=1
+            if self.scroll_pos > len(self.scroll_text)-14:
+                self.scroll_pos = 0
+                self.do_scroll_text(True)
+            else:
+                self.do_scroll_text(False)
+        self.scroll_timer = asyncio.create_task(scroll_timer_handler(self, first))
 
     def post_exit_event(self):
         self.events.push(Event(Event.EXIT))
@@ -847,13 +856,12 @@ class ApplicationHandler:
                 elif event.type == Event.RDS_Basic_Tuning:
                     self.display.text(vga2_bold_16x32, event.text, RADIO_NAME_X, RADIO_NAME_Y, st7789.WHITE, st7789.BLACK)
                 elif event.type == Event.RDS_Radio_Text:
-                    # if self.scroll_timer is not None:
-                    #     self.scroll_timer.cancel()
-                    # if len(event.text) > 14:
-                    #     self.scroll_text = str(event.text)+" "*14
-                    #     self.scroll_pos = 0
-                    #     self.do_scroll_text()
-                    self.display.text(vga2_bold_16x32, event.text[:14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
+                    if self.scroll_timer is not None:
+                        self.scroll_timer.cancel()
+                    if len(event.text) > 14:
+                        self.scroll_text = event.text.strip()+" "*14
+                        self.scroll_pos = 0
+                        self.do_scroll_text(True)
                 # volume setting handling when radio is on
                 # priority over app handling
                 # pushing rotary button without rotation is considered as a normal click.
@@ -919,6 +927,9 @@ class ApplicationHandler:
 
     def ko_handler(self, pin):
         state = pin.value()
+        if state == self.last_ko_state:
+            return
+        self.last_ko_state = state
         if state == 0:
             print("KO button pressed")
             self.events.push(Event(Event.KO_PUSH))

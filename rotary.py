@@ -10,13 +10,14 @@ class RotaryEncoder:
         self.pin_button = pin_button
         self.event_queue = event_queue
         self.last_rotation_ts = 0
+        self.last_button_state = 1
         # Initialize GPIO pins and interrupts
         self.pin_a.irq(self._handle_rotation, Pin.IRQ_FALLING)
         self.pin_button.irq(self._handle_button, Pin.IRQ_RISING | Pin.IRQ_FALLING)
 
     def _handle_rotation(self, pin):
         # Logic to determine rotation direction and generate events
-        a_state = self.pin_a.value()
+        a_state = pin.value()
         b_state = self.pin_b.value()
         now = time.ticks_ms()
         if a_state == 0 and b_state == 1:
@@ -35,6 +36,9 @@ class RotaryEncoder:
     def _handle_button(self, pin):
         # Logic to handle button press and generate event
         state = pin.value()
+        if self.last_button_state == state:
+            return
+        self.last_button_state = state
         if state == 0:
             self.event_queue.push(Event(Event.ROT_PUSH))
         else:
