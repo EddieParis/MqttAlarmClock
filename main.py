@@ -42,11 +42,20 @@ RADIO_TEXT_X = const(0)
 RADIO_TEXT_Y = const(SCREEN_HEIGHT-32-32)
 
 class RadioManager:
-    def __init__(self, radio, radio_app):
+    def __init__(self, radio):
         self.radio = radio
-        self.radio_app = radio_app
         self.radio_on = False
         self.delay_task = None
+        self.setting_volume = False
+        self.volume_set = False
+
+        self.scroll_timer = None
+        self.scroll_text = ""
+        self.scroll_pos = 0
+
+    def set_main_app(self, main_app):
+        self.main_app = main_app
+        self.radio_app = main_app.radio_app
 
     def set_volume(self, volume):
         self.radio.set_volume(volume)
@@ -64,12 +73,25 @@ class RadioManager:
         else:
             self.radio.enable_rds(False)
             self.radio.mute(True)
+            self.clean_and_stop_scroll()
             self.radio_on = False
         self.radio_app.display_mini()
+
+    def clean_and_stop_scroll(self):
+        if self.scroll_timer is not None:
+            self.scroll_timer.cancel()
+        self.main_app.display.fill_rect(0, RADIO_NAME_Y, MINI_SPLIT_X, 64, st7789.BLACK)
 
     def tune_to(self, frequency):
         self.radio.enable_rds(False)
         self.radio.set_frequency(frequency)
+
+    def seek(self, up):
+        self.clean_and_stop_scroll()
+        if up:
+            self.radio.seek_up()
+        else:
+            self.radio.seek_down()
 
     def delayed_off(self, delay_minutes):
         self.radio_app.display_mini()
@@ -89,7 +111,66 @@ class RadioManager:
         self.radio_app.sleep_time = delay_minutes
         self.delay_task = asyncio.create_task(delayed_task())
 
+    def do_scroll_text(self, first=False):
+        async def scroll_timer_handler(self, first):
+            self.main_app.display.text(vga2_bold_16x32, self.scroll_text[self.scroll_pos:self.scroll_pos+14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
+            await asyncio.sleep(2 if first else .250)
+            self.scroll_pos +=1
+            if self.scroll_pos > len(self.scroll_text)-14:
+                self.scroll_pos = 0
+                self.do_scroll_text(True)
+            else:
+                self.do_scroll_text(False)
+        self.scroll_timer = asyncio.create_task(scroll_timer_handler(self, first))
+
     def handle_event(self, event):
+        if self.radio_on:
+            if event.type == Event.TUNED:
+                self.radio.enable_rds(True)  # Enable RDS when tuned
+                freq_str = "{:>5.1f} MHz".format(event.frequency)
+                rssi_str = "{}".format(event.rssi)
+                self.main_app.display.fill_rect(0, RADIO_NAME_Y, RADIO_NAME_X, 32, st7789.BLACK)
+                self.main_app.display.text(vga2_8x16, freq_str, 0, RADIO_NAME_Y, st7789.WHITE)
+                ctr = 0
+                levels = [10, 20, 30, 40]
+                while ctr < 4 and event.rssi >= levels[ctr]:
+                    self.main_app.display.vline(24+2*ctr, RADIO_NAME_Y+32-4-4*ctr, 4*ctr+4, Application.foreground)
+                    ctr += 1
+                self.main_app.display.text(vga2_8x16, rssi_str, 0, RADIO_NAME_Y + 16, st7789.WHITE)
+            elif event.type == Event.RDS_Basic_Tuning:
+                self.main_app.display.text(vga2_bold_16x32, event.text, RADIO_NAME_X, RADIO_NAME_Y, st7789.WHITE, st7789.BLACK)
+            elif event.type == Event.RDS_Radio_Text:
+                if self.scroll_timer is not None:
+                    self.scroll_timer.cancel()
+                if len(event.text) > 14:
+                    self.scroll_text = event.text.strip()+" "*14
+                    self.scroll_pos = 0
+                    self.do_scroll_text(True)
+            # volume setting handling when radio is on
+            # priority over app handling
+            # pushing rotary button without rotation is considered as a normal click.
+            elif event.type == Event.ROT_PUSH:
+                if self.radio_on:
+                    self.setting_volume = True
+                    return None
+            elif self.setting_volume:
+                if event.type == Event.ROT_REL and self.volume_set:
+                    self.setting_volume = False
+                    self.volume_set = False
+                    return None
+                elif event.type == Event.ROT_REL:
+                    # volume was not set, so consider as normal click
+                    self.setting_volume = False
+                elif event.type == Event.ROT_CW :
+                    # volume adjustment
+                    self.set_volume(self.radio.get_volume() + (1 if not event.fast else 5))
+                    self.volume_set = True
+                    return None
+                elif event.type == Event.ROT_CCW:
+                    # volume adjustment
+                    self.set_volume(self.radio.get_volume() - (1 if not event.fast else 5))
+                    self.volume_set = True
+                    return None
         return event
 
 
@@ -216,11 +297,11 @@ class Application:
                 self.display_arrow_mode(clear_all=True)
                 self.handle_event(Event(Event.MODE_ENTER))
             elif event.type == Event.KO_PUSH:
-                self.display.fill_rect(0, 0, 238, 16, Application.background)
+                self.display.fill_rect(0, 0, MINI_SPLIT_X, 16, Application.background)
                 self.selected = False
                 self.display_mini()
                 self.display_arrow_mode(clear_all=True)
-                return None
+                self.main_app.post_exit_event()
         return self
 
     def __setattr__(self, name, value):
@@ -275,9 +356,9 @@ class RadioSeekMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.ROT_CW:
-            self.radio_app.radio_mgr.radio.seek_up()
+            self.radio_app.radio_mgr.seek(True)
         elif event.type == Event.ROT_CCW:
-            self.radio_app.radio_mgr.radio.seek_down()
+            self.radio_app.radio_mgr.seek(False)
         elif event.type == Event.KO_PUSH:
             return None
         return self    
@@ -756,12 +837,12 @@ class ApplicationHandler:
             print("Failed to sync time: {}".format(e))
 
 
-        self.radio_mgr = RadioManager(self.radio, None)
+        self.radio_mgr = RadioManager(self.radio)
 
         main_coords = Point(MAIN_AREA_X, MAIN_AREA_Y)
 
         self.radio_app = RadioApp("Radio", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
-        self.radio_mgr.radio_app = self.radio_app
+        self.radio_mgr.set_main_app(self)
         alarm_app1 = AlarmApp("Alarm1", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
         alarm_app2 = AlarmApp("Alarm2", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
         favorites_app = FavoritesApp("Favorites", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
@@ -786,13 +867,6 @@ class ApplicationHandler:
 
         self.pre_app = 0
         self.selected_app = None
-
-        self.setting_volume = False
-        self.volume_set = False
-
-        self.scroll_timer = None
-        self.scroll_text = ""
-        self.scroll_pos = 0
 
         self.last_ko_state = 1
 
@@ -822,83 +896,24 @@ class ApplicationHandler:
             self.events.push(Event(Event.TIMEOUT))
         return asyncio.create_task(async_delay_task(self, delay))
 
-    def do_scroll_text(self, first=False):
-        async def scroll_timer_handler(self, first):
-            self.display.text(vga2_bold_16x32, self.scroll_text[self.scroll_pos:self.scroll_pos+14], RADIO_TEXT_X, RADIO_TEXT_Y, st7789.WHITE, st7789.BLACK)
-            await asyncio.sleep(2 if first else .250)
-            self.scroll_pos +=1
-            if self.scroll_pos > len(self.scroll_text)-14:
-                self.scroll_pos = 0
-                self.do_scroll_text(True)
-            else:
-                self.do_scroll_text(False)
-        self.scroll_timer = asyncio.create_task(scroll_timer_handler(self, first))
-
     def post_exit_event(self):
         self.events.push(Event(Event.EXIT))
 
     def handle_events(self):
         event = self.events.pop()
         while event is not None:
-            if self.radio_mgr.radio_on:
-                if event.type == Event.TUNED:
-                    self.radio.enable_rds(True)  # Enable RDS when tuned
-                    freq_str = "{:>5.1f} MHz".format(event.frequency)
-                    rssi_str = "{}".format(event.rssi)
-                    self.display.fill_rect(0, RADIO_NAME_Y, RADIO_NAME_X, 32, st7789.BLACK)
-                    self.display.text(vga2_8x16, freq_str, 0, RADIO_NAME_Y, st7789.WHITE)
-                    ctr = 0
-                    levels = [10, 20, 30, 40]
-                    while ctr < 4 and event.rssi >= levels[ctr]:
-                        self.display.vline(24+2*ctr, RADIO_NAME_Y+32-4-4*ctr, 4*ctr+4, Application.foreground)
-                        ctr += 1
-                    self.display.text(vga2_8x16, rssi_str, 0, RADIO_NAME_Y + 16, st7789.WHITE)
-                elif event.type == Event.RDS_Basic_Tuning:
-                    self.display.text(vga2_bold_16x32, event.text, RADIO_NAME_X, RADIO_NAME_Y, st7789.WHITE, st7789.BLACK)
-                elif event.type == Event.RDS_Radio_Text:
-                    if self.scroll_timer is not None:
-                        self.scroll_timer.cancel()
-                    if len(event.text) > 14:
-                        self.scroll_text = event.text.strip()+" "*14
-                        self.scroll_pos = 0
-                        self.do_scroll_text(True)
-                # volume setting handling when radio is on
-                # priority over app handling
-                # pushing rotary button without rotation is considered as a normal click.
-                if event.type == Event.ROT_PUSH:
-                    self.setting_volume = True
-                    event = self.events.pop()
-                    continue
-                elif self.setting_volume:
-                    if event.type == Event.ROT_REL and self.volume_set:
-                        self.setting_volume = False
-                        self.volume_set = False
-                        event = self.events.pop()
-                        continue
-                    elif event.type == Event.ROT_REL:
-                        # volume was not set, so consider as normal click
-                        self.setting_volume = False
-                    elif event.type == Event.ROT_CW :
-                        # volume adjustment
-                        self.radio_mgr.set_volume(self.radio.get_volume() + (1 if not event.fast else 5))
-                        self.volume_set = True
-                        event = self.events.pop()
-                        continue
-                    elif event.type == Event.ROT_CCW:
-                        # volume adjustment
-                        self.radio_mgr.set_volume(self.radio.get_volume() - (1 if not event.fast else 5))
-                        self.volume_set = True
-                        event = self.events.pop()
-                        continue
+            if self.radio_mgr.handle_event(event) is None:
+                event = self.events.pop()
+                continue
             if self.selected_app is not None:
-                app = self.selected_app # save app
-                self.selected_app = self.selected_app.handle_event(event)
-                if self.selected_app is None:
-                    if app.need_save:
-                        with open("{}.json".format(app.name), "wt") as file:
-                            json.dump(app.save_state(), file)
-                        app.need_save = False
+                if event.type == Event.EXIT:
+                    if self.selected_app.need_save:
+                        with open("{}.json".format(self.selected_app.name), "wt") as file:
+                            json.dump(self.selected_app.save_state(), file)
+                        self.selected_app.need_save = False
                     self.display_arrow_app()
+                else:
+                    self.selected_app.handle_event(event)
             else:
                 if event.type == Event.ROT_CW:
                     self.pre_app += 1
@@ -910,19 +925,13 @@ class ApplicationHandler:
                     if self.pre_app < 0:
                         self.pre_app = len(self.apps)-1
                     self.display_arrow_app()
-                elif event.type == Event.ROT_PUSH:
-                    if self.radio_mgr.radio_on:
-                        self.setting_volume = True
                 elif event.type == Event.ROT_REL:
-                    if self.setting_volume:
-                        self.setting_volume = False
-                    else:
-                        #switch app
-                        self.selected_app = self.apps[self.pre_app]
-                        self.selected_app.selected = True
-                        self.display_arrow_app(clear_all=True)
-                        self.selected_app.display_mini()
-                        self.selected_app.display_modes()
+                    #switch app
+                    self.selected_app = self.apps[self.pre_app]
+                    self.selected_app.selected = True
+                    self.display_arrow_app(clear_all=True)
+                    self.selected_app.display_mini()
+                    self.selected_app.display_modes()
             event = self.events.pop()
 
     def ko_handler(self, pin):

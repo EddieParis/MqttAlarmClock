@@ -295,6 +295,8 @@ class SI4703:
             self.shadow_register[REG_SYSCONFIG1] |= 0x1000  # Set RDS bit
         else:
             self.shadow_register[REG_SYSCONFIG1] &= ~0x1000  # Clear RDS bit
+            self.radio_text = None
+            self.basic_tuning = None
         self._write_registers(REG_SYSCONFIG1)
 
     def seek_all(self, rssi_min=20):
