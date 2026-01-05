@@ -218,6 +218,18 @@ class Clock:
             self.radio_mgr.set_volume(vol)
             await asyncio.sleep(5)
 
+    def handle_event(self, event):
+        ringing_alarms = list(filter(lambda x: x.ringing, self.alarms))
+        if len(ringing_alarms):
+            if event.type == Event.KO_REL:
+                return None
+            elif event.tpye == Event.ROT_REL:
+                for alarm in ringing_alarms:
+                    alarm.ringing = False
+                self.radio_mgr.set_radio_on(False)
+                return None
+        return event
+
 class Point:
     def __init__(self, x, y):
         self.x = x
@@ -227,11 +239,11 @@ class Application:
     background = st7789.BLACK
     foreground = st7789.WHITE
 
-    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords, modes=[]):
+    def __init__(self, name, main_app, main_coords, mini_coords, modes=[]):
         self.name = name
         self.main_app = main_app
         self.display = main_app.display
-        self.radio_mgr = radio_mgr
+        self.radio_mgr = main_app.radio_mgr
         self.main_coords = main_coords
         self.mini_coords = mini_coords
         self.selected = False
@@ -296,12 +308,14 @@ class Application:
                 self.display_modes(selected=self.mode_index)
                 self.display_arrow_mode(clear_all=True)
                 self.handle_event(Event(Event.MODE_ENTER))
+                return None
             elif event.type == Event.KO_PUSH:
                 self.display.fill_rect(0, 0, MINI_SPLIT_X, 16, Application.background)
-                self.selected = False
+                self.selected_mode = None
                 self.display_mini()
                 self.display_arrow_mode(clear_all=True)
                 self.main_app.post_exit_event()
+                return None
         return self
 
     def __setattr__(self, name, value):
@@ -355,13 +369,30 @@ class RadioSeekMode(Mode):
         self.radio_app = radio_app
 
     def handle_event(self, event):
+        if event.type == Event.MODE_ENTER:
+            self.print_arrows()
         if event.type == Event.ROT_CW:
+            self.print_arrows(big_right=True)
             self.radio_app.radio_mgr.seek(True)
         elif event.type == Event.ROT_CCW:
+            self.print_arrows(big_left=True)
             self.radio_app.radio_mgr.seek(False)
+        elif event.type == Event.TUNED:
+            self.print_arrows()
         elif event.type == Event.KO_PUSH:
             return None
         return self    
+
+    def print_arrows(self, big_left=False, big_right=False):
+        self.radio_app.display.fill_rect(self.radio_app.main_coords.x+102, self.radio_app.main_coords.y, 50, 32, Application.background)
+        if big_left:
+            self.radio_app.display.text(vga2_bold_16x32, "\x11", self.radio_app.main_coords.x+110-8, self.radio_app.main_coords.y, Application.foreground)
+        else:
+            self.radio_app.display.text(vga2_8x16, "\x11", self.radio_app.main_coords.x+110, self.radio_app.main_coords.y+8, Application.foreground)
+        if big_right:
+            self.radio_app.display.text(vga2_bold_16x32, "\x10", self.radio_app.main_coords.x+130, self.radio_app.main_coords.y, Application.foreground)
+        else:
+            self.radio_app.display.text(vga2_8x16, "\x10", self.radio_app.main_coords.x+130, self.radio_app.main_coords.y+8, Application.foreground)
 
 class RadioManualMode(Mode):
     def __init__(self, radio_app):
@@ -387,7 +418,7 @@ class RadioFavMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.MODE_ENTER:
-            self.stations = [[98.2, "  F. G.  ", True], [87.5, None, False]]
+            self.stations = list(self.radio_app.main_app.favorites_app.stations)
             filter(lambda x: x[2], self.stations)
             display_stations(self.stations, self.start, self.radio_app.display, self.radio_app.main_coords.x, self.radio_app.main_coords.y, self.highlight, False)
         elif event.type == Event.ROT_CW:
@@ -445,8 +476,8 @@ class RadioSleepMode(Mode):
 
 class RadioApp(Application):
 
-    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
-        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
+    def __init__(self, name, main_app, main_coords, mini_coords):
+        super().__init__(name, main_app, main_coords, mini_coords)
         self.modes = [ RadioOnOff(self),
                   RadioFavMode(self),
                   RadioSeekMode(self),
@@ -577,13 +608,13 @@ class AlarmSetVolume(Mode):
 
 class AlarmApp(Application):
 
-    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
+    def __init__(self, name, main_app, main_coords, mini_coords):
         modes = [AlarmOn(self),
                  AlarmOff(self),
                  AlarmStation(self),
                  AlarmSet(self),
                  AlarmSetVolume(self)]
-        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords, modes=modes)
+        super().__init__(name, main_app, main_coords, mini_coords, modes=modes)
         self.wakeup = [0,0]
         self.active = False
         self.volume = 12
@@ -713,9 +744,9 @@ class FavScanMode(Mode):
         elif event.type == Event.TUNED:
             if not event.valid:
                 self.scan_continue()
-                return self
-            self.radio.enable_rds(True)
-            self.timer = self.favorites_app.main_app.set_timer(1)
+            else:
+                self.radio.enable_rds(True)
+                self.timer = self.favorites_app.main_app.set_timer(1)
         elif event.type == Event.RDS_Basic_Tuning:
             if self.timer is not None:
                 self.timer.cancel()
@@ -745,8 +776,8 @@ class FavScanMode(Mode):
         self.radio.seek_up(False)
 
 class FavoritesApp(Application):
-    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
-        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
+    def __init__(self, name, main_app, main_coords, mini_coords):
+        super().__init__(name, main_app, main_coords, mini_coords)
         self.modes = [FavSelectMode(self), FavScanMode(self)]
         self.stations = []
         self.saved_attributes = ["stations"]
@@ -783,8 +814,8 @@ class ClockZoneMode(Mode):
        
 
 class SettingsApp(Application):
-    def __init__(self, name, main_app, radio_mgr, main_coords, mini_coords):
-        super().__init__(name, main_app, radio_mgr, main_coords, mini_coords)
+    def __init__(self, name, main_app, main_coords, mini_coords):
+        super().__init__(name, main_app, main_coords, mini_coords)
         self.modes = [ClockZoneMode(self)]
         self.zone = 0
         self.saved_attributes = ["zone"]
@@ -794,10 +825,10 @@ class ApplicationHandler:
         self.event_flag = asyncio.ThreadSafeFlag()
         self.events = EventsQueue(self.event_flag)
 
-        self.pin_a = Pin(26, Pin.IN)
-        self.pin_b = Pin(25, Pin.IN)
-        self.rotary_button = Pin(33, Pin.IN)
-        self.rotary = RotaryEncoder(self.pin_a, self.pin_b, self.rotary_button, self.events)
+        pin_a = Pin(26, Pin.IN)
+        pin_b = Pin(25, Pin.IN)
+        rotary_button = Pin(33, Pin.IN)
+        self.rotary = RotaryEncoder(pin_a, pin_b, rotary_button, self.events)
 
         self.pin_ko = Pin(32, Pin.IN)
         self.pin_ko.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.ko_handler)
@@ -841,19 +872,19 @@ class ApplicationHandler:
 
         main_coords = Point(MAIN_AREA_X, MAIN_AREA_Y)
 
-        self.radio_app = RadioApp("Radio", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
+        self.radio_app = RadioApp("Radio", self, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN))
         self.radio_mgr.set_main_app(self)
-        alarm_app1 = AlarmApp("Alarm1", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
-        alarm_app2 = AlarmApp("Alarm2", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
-        favorites_app = FavoritesApp("Favorites", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
-        settings_app = SettingsApp("Settings", self, self.radio_mgr, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 4*MINI_APP_HEIGHT))
+        alarm_app1 = AlarmApp("Alarm1", self, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + MINI_APP_HEIGHT))
+        alarm_app2 = AlarmApp("Alarm2", self, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 2*MINI_APP_HEIGHT))
+        self.favorites_app = FavoritesApp("Favorites", self, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 3*MINI_APP_HEIGHT))
+        settings_app = SettingsApp("Settings", self, main_coords, Point(MINI_SPLIT_X+MINI_APP_X_MARGIN, MINI_APP_Y_MARGIN + 4*MINI_APP_HEIGHT))
 
         self.clock = Clock(self, self.radio_mgr, [alarm_app1, alarm_app2], settings_app)
 
         self.apps = [ self.radio_app,
                       alarm_app1,
                       alarm_app2,
-                      favorites_app,
+                      self.favorites_app,
                       settings_app
                     ]
 
@@ -905,12 +936,18 @@ class ApplicationHandler:
             if self.radio_mgr.handle_event(event) is None:
                 event = self.events.pop()
                 continue
+            if self.clock.handle_event(event) is None:
+                event = self.events.pop()
+                continue
             if self.selected_app is not None:
                 if event.type == Event.EXIT:
                     if self.selected_app.need_save:
                         with open("{}.json".format(self.selected_app.name), "wt") as file:
                             json.dump(self.selected_app.save_state(), file)
                         self.selected_app.need_save = False
+                    self.selected_app.selected = False
+                    self.selected_app.display_mini()
+                    self.selected_app = None
                     self.display_arrow_app()
                 else:
                     self.selected_app.handle_event(event)
