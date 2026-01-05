@@ -83,6 +83,7 @@ class RadioManager:
         self.main_app.display.fill_rect(0, RADIO_NAME_Y, MINI_SPLIT_X, 64, st7789.BLACK)
 
     def tune_to(self, frequency):
+        self.clean_and_stop_scroll()
         self.radio.enable_rds(False)
         self.radio.set_frequency(frequency)
 
@@ -418,8 +419,7 @@ class RadioFavMode(Mode):
 
     def handle_event(self, event):
         if event.type == Event.MODE_ENTER:
-            self.stations = list(self.radio_app.main_app.favorites_app.stations)
-            filter(lambda x: x[2], self.stations)
+            self.stations = list(filter(lambda x: x[2],self.radio_app.main_app.favorites_app.stations))
             display_stations(self.stations, self.start, self.radio_app.display, self.radio_app.main_coords.x, self.radio_app.main_coords.y, self.highlight, False)
         elif event.type == Event.ROT_CW:
             self.highlight += 1
@@ -534,6 +534,7 @@ class AlarmSet(Mode):
         if event.type == Event.MODE_ENTER:
             self.setting_hour = True
             self.hour, self.minute = self.alarm_app.wakeup
+            self.display_time(first=True)
         elif event.type == Event.ROT_CW:
             if self.setting_hour:
                 self.hour += 5 if event.fast else 1
@@ -565,8 +566,10 @@ class AlarmSet(Mode):
         self.display_time()
         return self
 
-    def display_time(self):
-        self.alarm_app.display.text(vga2_bold_16x32, "Alarm: xx:xx", self.alarm_app.main_coords.x, self.alarm_app.main_coords.y, Application.foreground)
+    def display_time(self, first=False):
+        if first:
+            self.alarm_app.display.text(vga2_bold_16x32, "Alarm: ", self.alarm_app.main_coords.x, self.alarm_app.main_coords.y, Application.foreground)
+            self.alarm_app.display.text(vga2_bold_16x32, ":", self.alarm_app.main_coords.x+9*16, self.alarm_app.main_coords.y, Application.foreground)
         time_str = "{:02}".format(self.hour)
         fg, bg = self.alarm_app.get_fg_bg_color(self.setting_hour)
         self.alarm_app.display.text(vga2_bold_16x32, time_str, self.alarm_app.main_coords.x+7*16, self.alarm_app.main_coords.y, fg, bg)
@@ -833,7 +836,7 @@ class ApplicationHandler:
         self.pin_ko = Pin(32, Pin.IN)
         self.pin_ko.irq(trigger=Pin.IRQ_FALLING | Pin.IRQ_RISING, handler=self.ko_handler)
 
-        spi = SPI(2, baudrate=4000000, polarity=1, phase=1, sck=Pin(16), mosi=Pin(17))
+        spi = SPI(2, baudrate=8000000, polarity=1, phase=1, sck=Pin(16), mosi=Pin(17))
         # H W inverted, screen is rotated
         self.display = st7789.ST7789(spi, 240, 320, reset=Pin(5, Pin.OUT), dc=Pin(18, Pin.OUT), backlight=Pin(19, Pin.OUT), rotation=1, color_order=st7789.RGB)
         self.display.inversion_mode(False)
@@ -977,11 +980,9 @@ class ApplicationHandler:
             return
         self.last_ko_state = state
         if state == 0:
-            print("KO button pressed")
             self.events.push(Event(Event.KO_PUSH))
             # Implement KO button functionality here
         else:
-            print("KO button released")
             self.events.push(Event(Event.KO_REL))
             # Implement KO button release functionality here
 
